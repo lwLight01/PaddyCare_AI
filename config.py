@@ -13,20 +13,16 @@ LOG_DIR     = os.path.join(BASE_DIR, "logs")
 
 IMAGE_SIZE    = 456          # EfficientNet-B5 native resolution
 BATCH_SIZE    = 8
-EPOCHS        = 50
+EPOCHS        = 20
 LEARNING_RATE = 0.0001
 NUM_WORKERS   = 2
 PIN_MEMORY    = True
 ACCUM_STEPS   = 4        # Gradient accumulation — effective batch = BATCH_SIZE * ACCUM_STEPS = 32
 WARMUP_EPOCHS = 10       # Phase-1: train classifier head only; Phase-2: fine-tune whole network
 
-# ⚠️  CLASS_NAMES must stay in the SAME alphabetical order that
-# torchvision.datasets.ImageFolder discovers your dataset/train/ subfolders.
-# When you add a new disease, insert it in the correct alphabetical position.
 CLASS_NAMES = [
     "Bacterial Blight",
     "Healthy",
-    "Not Leaf",
     # ── add new disease names here (alphabetical order!) ──
 ]
 NUM_CLASSES = len(CLASS_NAMES)
@@ -44,8 +40,8 @@ CONFIDENCE_THRESHOLD  = 0.60   # only show predictions with >= 60 % confidence
 OOD_ENTROPY_THRESHOLD = round(0.75 * math.log(max(NUM_CLASSES, 2)), 4)
 TOP_K                 = 3     # return up to 3 predictions (useful for 8+ classes)
 
-# Name of the reject class — used by predict.py and Android to detect "not a leaf"
-NOT_LEAF_CLASS = "Not Leaf"
+# Name of the reject class — update when a 'Not Leaf' class is added back
+# NOT_LEAF_CLASS = "Not Leaf"
 
 API_LOG_FILE      = os.path.join(LOG_DIR, "api.log")
 TRAIN_LOG_FILE    = os.path.join(LOG_DIR, "train.log")
@@ -86,17 +82,6 @@ TREATMENTS = {
             "৪. আশেপাশে রোগ থাকলে প্রতিরোধমূলক ছত্রাকনাশক দিন।"
         ),
     },
-    "Not Leaf": {
-        "en": (
-            "This image is not a paddy (rice) leaf.\n"
-            "PaddyCare can only diagnose diseases from paddy leaf photos.\n"
-            "Please upload a clear, close-up photo of a paddy leaf."
-        ),
-        "bn": (
-            "এই ছবিটি ধান (চাল) পাতার নয়।\n"
-            "PaddyCare শুধুমাত্র ধান পাতার ছবি থেকে রোগ নির্ণয় করতে পারে।\n"
-            "অনুগ্রহ করে ধান পাতার একটি স্পষ্ট ও কাছের ছবি আপলোড করুন।"
-        ),
-    },
+    # "Not Leaf" treatment removed — add back when the class is re-introduced
 }
 

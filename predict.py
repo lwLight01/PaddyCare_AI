@@ -10,7 +10,6 @@ import numpy as np
 from config import (
     MODEL_PATH, IMAGE_SIZE, CLASS_NAMES, CLASS_STATS_PATH,
     CONFIDENCE_THRESHOLD, OOD_ENTROPY_THRESHOLD, TOP_K, TREATMENTS,
-    NOT_LEAF_CLASS,
 )
 from model import load_model, extract_embedding
 
@@ -20,31 +19,9 @@ _model = None
 _class_stats = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Paddy-leaf image validator
-# ─────────────────────────────────────────────────────────────────────────────
 
 def check_paddy_image(img: Image.Image) -> tuple[bool, dict]:
-    """
-    Two-stage heuristic to decide if an image is a paddy (rice) leaf.
-
-    Stage 1 – HSV colour analysis (100×100 thumbnail)
-    ---------------------------------------------------
-    PIL HSV encodes hue as 0–255 (NOT 0–360°).
-      brown/yellow/green  hue_deg  14–106  →  PIL hue  10–75
-      green specifically  hue_deg  34–106  →  PIL hue  24–75
-
-    Thresholds (tightened vs. previous version):
-      plant_ratio  ≥ 0.12   (≥12 % of pixels are plant-coloured)
-      green_ratio  ≥ 0.05   (≥5 % of pixels are green)
-
-    Stage 2 – Edge / texture density (grayscale Sobel-like via numpy)
-    -------------------------------------------------------------------
-    Real leaf images have moderate edge content (leaf veins, borders).
-    Very smooth images (plain backgrounds, skies, skin) or very noisy
-    images (random textures) are filtered here.
-      edge_ratio  between 0.03 and 0.70
-    """
+   
     small = img.resize((100, 100)).convert("HSV")
     pixels = small.getdata()
 
@@ -83,11 +60,6 @@ def check_paddy_image(img: Image.Image) -> tuple[bool, dict]:
         "green_ratio": round(green_ratio, 4),
         "edge_ratio":  round(float(edge_ratio),  4),
     }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Model & stats loaders
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_model():
     global _model
@@ -135,9 +107,6 @@ infer_transform = transforms.Compose([
 ])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main prediction function — 5-Layer OOD rejection
-# ─────────────────────────────────────────────────────────────────────────────
 
 def predict(image_path: str, lang: str = "bn") -> dict:
     if not os.path.exists(image_path):
@@ -154,10 +123,10 @@ def predict(image_path: str, lang: str = "bn") -> dict:
         return {
             "status": "not_paddy",
             "message": (
-                "🚫 এই ছবিটি ধান পাতার নয়।\n"
+                "এই ছবিটি ধান পাতার নয়।\n"
                 "PaddyCare শুধুমাত্র ধান (rice) পাতার রোগ শনাক্ত করতে পারে।\n"
                 "অনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি আপলোড করুন।\n\n"
-                "🚫 This is not a paddy (rice) leaf image.\n"
+                "This is not a paddy (rice) leaf image.\n"
                 "PaddyCare can only analyse paddy leaf photos.\n"
                 "Please upload a clear, close-up photo of a paddy leaf."
             ),
@@ -176,25 +145,7 @@ def predict(image_path: str, lang: str = "bn") -> dict:
     top_class_idx = probs.argmax().item()
     top_class_name = CLASS_NAMES[top_class_idx]
 
-    # If the model itself predicts "Not Leaf" → reject
-    if top_class_name == NOT_LEAF_CLASS:
-        return {
-            "status": "not_paddy",
-            "message": (
-                "🚫 এই ছবিটি ধান পাতার নয়।\n"
-                "PaddyCare শুধুমাত্র ধান (rice) পাতার রোগ শনাক্ত করতে পারে।\n"
-                "অনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি আপলোড করুন।\n\n"
-                "🚫 This is not a paddy (rice) leaf image.\n"
-                "PaddyCare can only analyse paddy leaf photos.\n"
-                "Please upload a clear, close-up photo of a paddy leaf."
-            ),
-            "predictions": [],
-            "debug": {
-                **color_stats,
-                "max_conf": round(max_conf, 4),
-                "predicted_class": top_class_name,
-            },
-        }
+    # ("Not Leaf" class removed — OOD rejection now handled by Mahalanobis / entropy gates only)
 
     # ── Layer 3: Mahalanobis distance check ─────────────────────────────────
     stats = get_class_stats()
@@ -209,10 +160,10 @@ def predict(image_path: str, lang: str = "bn") -> dict:
                 return {
                     "status": "not_paddy",
                     "message": (
-                        "🚫 এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে পরিচিত ধান পাতা হিসেবে "
+                        "এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে পরিচিত ধান পাতা হিসেবে "
                         "চিনতে পারছে না।\n"
                         "অনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি আপলোড করুন।\n\n"
-                        "🚫 Although this image looks plant-like, the model does not recognise it "
+                        "Although this image looks plant-like, the model does not recognise it "
                         "as a known paddy leaf.\n"
                         "Please upload a clear, close-up photo of a paddy leaf."
                     ),
@@ -226,16 +177,15 @@ def predict(image_path: str, lang: str = "bn") -> dict:
                 }
 
     # ── Layer 4: Confidence gate ────────────────────────────────────────────
-    # Shannon entropy (nats).  Max for N classes = ln(N).
     entropy = -sum(p * math.log(p + 1e-9) for p in probs.tolist())
 
     if (max_conf < CONFIDENCE_THRESHOLD) or (entropy > OOD_ENTROPY_THRESHOLD):
         return {
             "status": "low_confidence",
             "message": (
-                "⚠️ ছবিটি অস্পষ্ট বা মডেল আত্মবিশ্বাসের সাথে শনাক্ত করতে পারছে না।\n"
+                "ছবিটি অস্পষ্ট বা মডেল আত্মবিশ্বাসের সাথে শনাক্ত করতে পারছে না।\n"
                 "সঠিক ফলাফলের জন্য ধান পাতার আরও পরিষ্কার ও কাছের ছবি আপলোড করুন।\n\n"
-                "⚠️ The image is unclear or the model cannot identify it confidently.\n"
+                "The image is unclear or the model cannot identify it confidently.\n"
                 "Please upload a sharper, closer photo of the paddy leaf."
             ),
             "predictions": [],
@@ -247,9 +197,6 @@ def predict(image_path: str, lang: str = "bn") -> dict:
         }
 
     # ── Layer 5: Build top-K results (filter "Not Leaf" from output) ────────
-    # Top-1 already cleared the gates above.
-    # Secondary predictions are included if they are ≥ 10 % — enough to be
-    # meaningful without being noise.
     SECONDARY_THRESHOLD = 10.0
     top_probs, top_indices = torch.topk(probs, k=min(TOP_K, len(CLASS_NAMES)))
     predictions = []
@@ -258,9 +205,7 @@ def predict(image_path: str, lang: str = "bn") -> dict:
         confidence_pct = round(prob * 100, 2)
         disease_name = CLASS_NAMES[idx]
 
-        # Never show "Not Leaf" as a result to the user
-        if disease_name == NOT_LEAF_CLASS:
-            continue
+        # ("Not Leaf" class removed — all classes are valid output)
 
         # Top-1: already validated by Layer 4 gate, always include
         # Others: must clear the secondary floor
@@ -279,9 +224,9 @@ def predict(image_path: str, lang: str = "bn") -> dict:
         return {
             "status": "low_confidence",
             "message": (
-                "⚠️ ছবিটি অস্পষ্ট বা মডেল আত্মবিশ্বাসের সাথে শনাক্ত করতে পারছে না।\n"
+                "ছবিটি অস্পষ্ট বা মডেল আত্মবিশ্বাসের সাথে শনাক্ত করতে পারছে না।\n"
                 "সঠিক ফলাফলের জন্য ধান পাতার আরও পরিষ্কার ও কাছের ছবি আপলোড করুন।\n\n"
-                "⚠️ The image is unclear or the model cannot identify it confidently.\n"
+                "The image is unclear or the model cannot identify it confidently.\n"
                 "Please upload a sharper, closer photo of the paddy leaf."
             ),
             "predictions": [],

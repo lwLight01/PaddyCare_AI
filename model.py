@@ -4,21 +4,7 @@ from torchvision import models
 from config import NUM_CLASSES
 
 
-# ── Backbone: EfficientNet-B5 ────────────────────────────────────────────────
-# EfficientNet-B5 uses compound scaling at a larger capacity (~30M params, 456×456 input)
-# for ~2% better ImageNet accuracy than B3. Well-suited for 8+ disease classes.
-# Quantize to INT8 before TFLite export to keep Android inference fast (~28 MB).
-
 def build_model(pretrained: bool = True) -> nn.Module:
-    """
-    Build EfficientNet-B5 with a custom classifier head.
-
-    After calling this function the model is in Phase-1 state:
-      - All feature-extractor parameters are FROZEN.
-      - Only the classifier head is trainable.
-
-    Call `unfreeze_all(model)` to enter Phase-2 fine-tuning.
-    """
     weights = models.EfficientNet_B5_Weights.DEFAULT if pretrained else None
     model = models.efficientnet_b5(weights=weights)
 
@@ -47,10 +33,7 @@ def build_model(pretrained: bool = True) -> nn.Module:
 
 
 def unfreeze_all(model: nn.Module) -> None:
-    """
-    Unlock ALL model parameters so the backbone can be gently adapted
-    to paddy-leaf features using a very small learning rate (e.g. 1e-5).
-    """
+    
     for param in model.parameters():
         param.requires_grad = True
 
@@ -68,20 +51,7 @@ def load_model(model_path: str, device: torch.device) -> nn.Module:
 # ── Embedding extraction (for Mahalanobis OOD detection) ─────────────────────
 
 def extract_embedding(model: nn.Module, input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Run a forward pass and capture the 128-dim embedding from classifier[5] (SiLU)
-    using a forward hook.  Returns (logits, embedding).
-
-    The classifier structure is:
-      [0] Dropout(0.4)
-      [1] Linear(in_features, 512)
-      [2] SiLU()
-      [3] Dropout(0.3)
-      [4] Linear(512, 128)
-      [5] SiLU()           ← HOOK HERE → 128-dim embedding
-      [6] Dropout(0.2)
-      [7] Linear(128, NUM_CLASSES)
-    """
+    
     embedding_output = {}
 
     def hook_fn(module, input, output):
@@ -99,14 +69,7 @@ def extract_embedding(model: nn.Module, input_tensor: torch.Tensor) -> tuple[tor
 
 
 class DualOutputWrapper(nn.Module):
-    """
-    Wraps a trained EfficientNet-B5 model to output BOTH logits and the
-    128-dim embedding in a single forward pass.  Used only for TFLite export
-    so the Android app can compute Mahalanobis distance on-device.
-
-    This does NOT modify the original model — it splits the classifier into
-    two stages and runs them sequentially.
-    """
+   
     def __init__(self, model: nn.Module):
         super().__init__()
         self.features = model.features
