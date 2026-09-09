@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary greens -->
+    <color name="green_dark">#0d4f2e</color>
+    <color name="green_mid">#28a165</color>
+    <color name="green_light">#6fcf97</color>
+    <color name="green_pale">#e8f5e9</color>
+
+    <!-- Gold accent -->
+    <color name="gold">#f59e0b</color>
+    <color name="gold_pale">#fef3c7</color>
+
+    <!-- Surfaces -->
+    <color name="bg">#f0f4f0</color>
+    <color name="surface">#ffffff</color>
+    <color name="white">#ffffff</color>
+    <color name="black">#000000</color>
+
+    <!-- Text -->
+    <color name="text_main">#1e293b</color>
+    <color name="text_muted">#94a3b8</color>
+
+    <!-- Severity -->
+    <color name="severity_high">#ef4444</color>
+    <color name="severity_high_bg">#fee2e2</color>
+    <color name="severity_high_text">#b91c1c</color>
+    <color name="severity_medium">#f59e0b</color>
+    <color name="severity_medium_bg">#fef3c7</color>
+    <color name="severity_medium_text">#92400e</color>
+    <color name="severity_low">#22c55e</color>
+    <color name="severity_low_bg">#dcfce7</color>
+    <color name="severity_low_text">#166534</color>
+
+    <!-- Warning -->
+    <color name="warning_bg">#fffbeb</color>
+    <color name="warning_border">#fde68a</color>
+    <color name="warning_title">#92400e</color>
+    <color name="warning_text">#78350f</color>
+</resources>
