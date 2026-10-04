@@ -11,16 +11,16 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     accuracy_score,
+    f1_score,
 )
-from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
 from config import (
-    MODEL_PATH, LOG_DIR, IMAGE_SIZE, BATCH_SIZE,
-    NUM_WORKERS, TEST_DIR, CLASS_NAMES, EVALUATE_LOG_FILE
+    MODEL_PATH, LOG_DIR, BATCH_SIZE,
+    NUM_WORKERS, TEST_DIR, EVALUATE_LOG_FILE
 )
 from model import load_model
-from dataset_utils import val_transform  # Use the same transform as training/validation
+from dataset_utils import val_transform, SafeImageFolder
 
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -31,7 +31,8 @@ logging.basicConfig(
 )
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
-logging.getLogger().addHandler(console)
+if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logging.getLogger().handlers):
+    logging.getLogger().addHandler(console)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,15 +56,16 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list):
 
 
 def evaluate():
-    if not os.path.isdir(TEST_DIR) or not os.listdir(TEST_DIR):
-        logging.error(
-            f"Test directory is empty or missing: {TEST_DIR}\n"
-            "Create dataset/test/<class>/ folders first."
-        )
+    if not os.path.isdir(TEST_DIR):
+        logging.error(f"Test directory is missing: {TEST_DIR}")
         return
 
-    test_dataset = datasets.ImageFolder(root=TEST_DIR, transform=val_transform)
-    test_loader  = DataLoader(
+    test_dataset = SafeImageFolder(root=TEST_DIR, transform=val_transform)
+    if len(test_dataset) == 0:
+        logging.error(f"No test images found in {TEST_DIR}")
+        return
+
+    test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
@@ -89,16 +91,20 @@ def evaluate():
     all_labels = np.array(all_labels)
 
     acc     = accuracy_score(all_labels, all_preds) * 100
+    macro_f1 = f1_score(all_labels, all_preds, average="macro")
     report  = classification_report(all_labels, all_preds, target_names=class_names)
     cm      = confusion_matrix(all_labels, all_preds)
 
-    logging.info(f"\nOverall Accuracy: {acc:.2f}%")
+    logging.info(f"\nOverall Accuracy : {acc:.2f}%")
+    logging.info(f"Macro-F1 Score   : {macro_f1:.4f}")
     logging.info(f"\nClassification Report:\n{report}")
 
     results = {
         "overall_accuracy": round(acc, 2),
+        "macro_f1": round(float(macro_f1), 4),
         "classification_report": report,
         "confusion_matrix": cm.tolist(),
+        "classes": class_names,
     }
     results_path = os.path.join(LOG_DIR, "evaluate_results.json")
     with open(results_path, "w", encoding="utf-8") as f:
@@ -108,6 +114,7 @@ def evaluate():
     plot_confusion_matrix(cm, class_names)
 
     print(f"\n[evaluate] Overall Accuracy : {acc:.2f}%")
+    print(f"[evaluate] Macro-F1 Score   : {macro_f1:.4f}")
     print(f"[evaluate] Results saved to : {LOG_DIR}")
 
 

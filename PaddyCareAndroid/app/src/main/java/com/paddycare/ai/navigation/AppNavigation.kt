@@ -204,12 +204,13 @@ fun PaddyCareNavHost() {
                     onAnalyzeComplete = { result, uri ->
                         currentResult   = result
                         currentImageUri = uri
-                        coroutineScope.launch {
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val savedPath = persistScanImage(context, uri)
                             val record = when (result) {
                                 is PredictionResult.Success -> {
                                     val top = result.predictions.first()
                                     ScanRecord(
-                                        imagePath    = uri.toString(),
+                                        imagePath    = savedPath,
                                         status       = "ok",
                                         diseaseName  = top.disease,
                                         diseaseNameBn = top.diseaseBn,
@@ -217,9 +218,9 @@ fun PaddyCareNavHost() {
                                         treatment    = top.treatment
                                     )
                                 }
-                                is PredictionResult.NotPaddy      -> ScanRecord(imagePath = uri.toString(), status = "not_paddy", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
-                                is PredictionResult.LowConfidence -> ScanRecord(imagePath = uri.toString(), status = "low_confidence", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
-                                is PredictionResult.Error         -> ScanRecord(imagePath = uri.toString(), status = "error", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
+                                is PredictionResult.NotPaddy      -> ScanRecord(imagePath = savedPath, status = "not_paddy", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
+                                is PredictionResult.LowConfidence -> ScanRecord(imagePath = savedPath, status = "low_confidence", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
+                                is PredictionResult.Error         -> ScanRecord(imagePath = savedPath, status = "error", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
                             }
                             database.scanDao().insert(record)
                         }
@@ -249,5 +250,20 @@ fun PaddyCareNavHost() {
             // Settings
             composable(Screen.Settings.route) { SettingsScreen() }
         }
+    }
+}
+
+private fun persistScanImage(context: android.content.Context, sourceUri: Uri): String {
+    return try {
+        val scansDir = java.io.File(context.filesDir, "scans").apply { mkdirs() }
+        val destFile = java.io.File(scansDir, "scan_${System.currentTimeMillis()}.jpg")
+        context.contentResolver.openInputStream(sourceUri)?.use { input ->
+            destFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+        Uri.fromFile(destFile).toString()
+    } catch (e: Exception) {
+        sourceUri.toString()
     }
 }

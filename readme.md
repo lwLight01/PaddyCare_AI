@@ -44,11 +44,19 @@ Evaluate the trained model against the validation set:
 python evaluate.py
 ```
 
+### OOD Calibration (Mahalanobis Distance)
+After training, compute the class embedding statistics for on-device out-of-distribution leaf detection:
+```bash
+python extract_embeddings.py
+```
+*(On CPU, you can add `--max-samples 100` for fast calibration).*
+This generates `models/class_stats.json`.
+
 ---
 
 ## 2. Convert Model to TensorFlow Lite
 
-To run the model on an Android phone offline, it must be converted from PyTorch to TensorFlow Lite.
+To run the model on an Android phone offline, convert it from PyTorch to TensorFlow Lite.
 
 ### Requirements
 Install the ONNX and TensorFlow conversion libraries:
@@ -57,15 +65,17 @@ pip install onnx onnxruntime onnx2tf tensorflow flatbuffers
 ```
 
 ### Export Script
-Run the export script. It will convert `model.pth` -> `model.onnx` -> `model.tflite` and generate a `labels.txt` file.
+Run the export script. It will convert `model.pth` -> `model.onnx` -> `model.tflite` and auto-sync all required files directly to the Android app's assets folder:
 ```bash
 python export_tflite.py
 ```
 *Note: You can use `python export_tflite.py --quantize` to shrink the model size using int8 quantization.*
 
-The script outputs two files:
-- `models/model.tflite`
-- `models/labels.txt`
+The export script outputs and syncs:
+- `models/model.tflite` -> `PaddyCareAndroid/app/src/main/assets/model.tflite`
+- `models/labels.txt` -> `PaddyCareAndroid/app/src/main/assets/labels.txt`
+- `models/class_stats.json` -> `PaddyCareAndroid/app/src/main/assets/class_stats.json`
+- `models/diseases.json` -> `PaddyCareAndroid/app/src/main/assets/diseases.json`
 
 ---
 
@@ -74,9 +84,7 @@ The script outputs two files:
 The `PaddyCareAndroid` folder contains the fully native Android app built with **Kotlin** and **Jetpack Compose**. It requires NO internet connection to scan leaves.
 
 ### Setup
-1. Copy your newly exported TFLite files to the Android assets folder:
-   - Copy `models/model.tflite` to `PaddyCareAndroid/app/src/main/assets/model.tflite`
-   - Copy `models/labels.txt` to `PaddyCareAndroid/app/src/main/assets/labels.txt`
+1. Run `python export_tflite.py` (it will auto-copy the assets into `PaddyCareAndroid/app/src/main/assets/`).
 2. Open **Android Studio** and select **Open Project**. Choose the `PaddyCareAndroid` folder.
 3. Click **"Sync Project with Gradle Files"**.
 

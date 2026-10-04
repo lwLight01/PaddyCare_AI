@@ -1,0 +1,37 @@
+{
+  "Bacterial Blight": {
+    "name_en": "Bacterial Blight",
+    "name_bn": "ব্যাকটেরিয়াল ব্লাইট",
+    "is_reject": false,
+    "treatment_en": "1. Spray Copper Oxychloride or Streptomycin solution.\n2. Drain excess water from the field immediately.\n3. Avoid high nitrogen fertilizer application.\n4. Use resistant paddy varieties (e.g., IR64).\n5. Remove and destroy infected plants.",
+    "treatment_bn": "১. কপার অক্সিক্লোরাইড বা স্ট্রেপটোমাইসিন দ্রবণ স্প্রে করুন।\n২. মাঠ থেকে অতিরিক্ত পানি দ্রুত নিষ্কাশন করুন।\n৩. অতিরিক্ত নাইট্রোজেন সার এড়িয়ে চলুন।\n৪. প্রতিরোধী ধানের জাত (যেমন IR64) ব্যবহার করুন।\n৫. আক্রান্ত গাছ তুলে নষ্ট করুন।"
+  },
+  "Blast": {
+    "name_en": "Blast",
+    "name_bn": "ব্লাস্ট রোগ",
+    "is_reject": false,
+    "treatment_en": "1. Spray Tricyclazole (0.1%) or Isoprothiolane fungicide.\n2. Apply silicon-based fertilizer to boost resistance.\n3. Avoid excess nitrogen fertilizer.\n4. Drain field water periodically.\n5. Use blast-resistant paddy varieties.",
+    "treatment_bn": "১. ট্রাইসাইক্লাজোল (০.১%) বা আইসোপ্রোথিওলেন ছত্রাকনাশক স্প্রে করুন।\n২. সিলিকন-ভিত্তিক সার প্রয়োগ করুন।\n৩. অতিরিক্ত নাইট্রোজেন সার এড়িয়ে চলুন।\n৪. মাঠের পানি মাঝে মাঝে নিষ্কাশন করুন।\n৫. ব্লাস্ট-প্রতিরোধী ধানের জাত ব্যবহার করুন।"
+  },
+  "Brown Spot": {
+    "name_en": "Brown Spot",
+    "name_bn": "বাদামী দাগ",
+    "is_reject": false,
+    "treatment_en": "1. Spray Mancozeb or Propiconazole fungicide.\n2. Apply balanced potassium and silicon fertilizer.\n3. Avoid water stress during the tillering stage.\n4. Use resistant varieties.\n5. Remove and burn infected plant debris.",
+    "treatment_bn": "১. ম্যানকোজেব বা প্রোপিকোনাজোল ছত্রাকনাশক স্প্রে করুন।\n২. সুষম পটাশিয়াম ও সিলিকন সার প্রয়োগ করুন।\n৩. কুশি পর্যায়ে পানির চাপ এড়িয়ে চলুন।\n৪. প্রতিরোধী জাত ব্যবহার করুন।\n৫. আক্রান্ত গাছের অবশিষ্ট পুড়িয়ে ফেলুন।"
+  },
+  "Healthy": {
+    "name_en": "Healthy",
+    "name_bn": "সুস্থ গাছ",
+    "is_reject": false,
+    "treatment_en": "Your paddy plant is healthy!\n1. Continue regular irrigation and fertilization.\n2. Monitor weekly for any early disease signs.\n3. Maintain proper field hygiene.\n4. Apply preventive fungicide if neighbors have infections.",
+    "treatment_bn": "আপনার ধান গাছ সুস্থ আছে!\n১. নিয়মিত সেচ ও সার দেওয়া অব্যাহত রাখুন।\n২. প্রতি সপ্তাহে রোগের প্রাথমিক লক্ষণ পর্যবেক্ষণ করুন।\n৩. মাঠ পরিষ্কার-পরিচ্ছন্ন রাখুন।\n৪. আশেপাশে রোগ থাকলে প্রতিরোধমূলক ছত্রাকনাশক দিন।"
+  },
+  "Not Leaf": {
+    "name_en": "Not Leaf",
+    "name_bn": "ধানের পাতা নয়",
+    "is_reject": true,
+    "treatment_en": "This image is not a paddy (rice) leaf.\nPaddyCare can only diagnose diseases from paddy leaf photos.\nPlease upload a clear, close-up photo of a paddy leaf.",
+    "treatment_bn": "এই ছবিটি ধান (চাল) পাতার নয়।\nPaddyCare শুধুমাত্র ধান পাতার ছবি থেকে রোগ নির্ণয় করতে পারে।\nঅনুগ্রহ করে ধান পাতার একটি স্পষ্ট ও কাছের ছবি আপলোড করুন।"
+  }
+}

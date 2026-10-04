@@ -10,15 +10,7 @@ import torchvision.transforms.functional as TF
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 from config import (
     TRAIN_DIR, VAL_DIR, TEST_DIR,
-    IMAGE_SIZE, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, LOG_DIR
-)
-
-os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(
-    filename=os.path.join(LOG_DIR, "train.log"),
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
+    IMAGE_SIZE, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, VALID_EXTENSIONS
 )
 
 
@@ -54,15 +46,38 @@ val_transform = transforms.Compose([
 ])
 
 
+class SafeImageFolder(datasets.ImageFolder):
+    """
+    Subclass of ImageFolder that automatically ignores empty class subdirectories.
+    Prevents FileNotFoundError when empty placeholder class folders exist.
+    """
+    def find_classes(self, directory: str):
+        classes = []
+        if not os.path.isdir(directory):
+            return [], {}
+
+        for entry in os.scandir(directory):
+            if entry.is_dir():
+                has_images = any(
+                    f.name.lower().endswith(VALID_EXTENSIONS)
+                    for f in os.scandir(entry.path)
+                    if f.is_file()
+                )
+                if has_images:
+                    classes.append(entry.name)
+
+        classes.sort()
+        class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
+        return classes, class_to_idx
+
+
 def get_class_weights(dataset: datasets.ImageFolder) -> torch.Tensor:
-    """Compute inverse-frequency class weights for CrossEntropyLoss(weight=...)."""
+    """Compute inverse-frequency class weights."""
     targets = np.array(dataset.targets)
     class_counts = np.bincount(targets, minlength=len(dataset.classes))
     class_counts = np.maximum(class_counts, 1)          # avoid division by zero
     weights = 1.0 / class_counts
     weights = weights / weights.sum() * len(dataset.classes)  # normalise so mean ≈ 1
-    logging.info(f"Class counts  : {dict(zip(dataset.classes, class_counts.tolist()))}")
-    logging.info(f"Class weights : {dict(zip(dataset.classes, np.round(weights, 4).tolist()))}")
     return torch.tensor(weights, dtype=torch.float32)
 
 
@@ -81,8 +96,11 @@ def get_weighted_sampler(dataset: datasets.ImageFolder) -> WeightedRandomSampler
 
 
 def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR):
-    train_dataset = datasets.ImageFolder(root=train_dir, transform=train_transform)
-    val_dataset   = datasets.ImageFolder(root=val_dir,   transform=val_transform)
+    train_dataset = SafeImageFolder(root=train_dir, transform=train_transform)
+    val_dataset   = SafeImageFolder(root=val_dir,   transform=val_transform)
+
+    if len(train_dataset.classes) == 0:
+        raise ValueError(f"No valid image classes found in {train_dir}!")
 
     # WeightedRandomSampler replaces shuffle=True and balances class frequencies
     sampler = get_weighted_sampler(train_dataset)
@@ -91,7 +109,7 @@ def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR):
         "train": DataLoader(
             train_dataset,
             batch_size=BATCH_SIZE,
-            sampler=sampler,                 # class-balanced sampling (Rec #6)
+            sampler=sampler,
             num_workers=NUM_WORKERS,
             pin_memory=PIN_MEMORY,
         ),
@@ -104,15 +122,16 @@ def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR):
         ),
     }
 
-    if os.path.isdir(test_dir) and os.listdir(test_dir):
-        test_dataset = datasets.ImageFolder(root=test_dir, transform=val_transform)
-        loaders["test"] = DataLoader(
-            test_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-        )
+    if os.path.isdir(test_dir):
+        test_dataset = SafeImageFolder(root=test_dir, transform=val_transform)
+        if len(test_dataset) > 0:
+            loaders["test"] = DataLoader(
+                test_dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                pin_memory=PIN_MEMORY,
+            )
 
     class_names = train_dataset.classes
     logging.info(f"Classes found: {class_names}")
@@ -123,5 +142,4 @@ def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR):
     print(f"[dataset] Train size: {len(train_dataset)}")
     print(f"[dataset] Val size  : {len(val_dataset)}")
 
-    # Also return train_dataset so train.py can compute class weights for the loss
     return loaders, class_names, train_dataset

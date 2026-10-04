@@ -1,10 +1,13 @@
 package com.paddycare.ai.ui.screens
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
+import com.paddycare.ai.PaddyCareApp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
@@ -102,40 +105,65 @@ fun HomeScreen(
         val uri = imageUri ?: return
         isAnalyzing = true
         coroutineScope.launch {
-            val result = withContext(Dispatchers.Default) {
-                val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
-                if (!isPlant) return@withContext PredictionResult.NotPaddy(context.getString(R.string.not_paddy_msg))
-                val classifier   = PaddyClassifier(context)
-                val classResult  = classifier.classify(bmp)
-                val predictions  = classResult.predictions
-                val entropy      = classifier.entropy(predictions.map { it.second })
-                val topPred      = predictions.first()
-                if (topPred.first == "Not Leaf") {
-                    classifier.close()
-                    return@withContext PredictionResult.NotPaddy(DiseaseInfo.getTreatment("Not Leaf", "bn"))
-                }
-                if (classifier.isOOD(classResult.embedding, topPred.first)) {
-                    classifier.close()
-                    return@withContext PredictionResult.NotPaddy(
-                        "🚫 এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে চিনতে পারছে না।\nঅনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি দিন।"
-                    )
-                }
-                classifier.close()
-                if (topPred.second < PaddyClassifier.CONFIDENCE_THRESHOLD || entropy > classifier.entropyThreshold) {
-                    return@withContext PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
-                }
-                val resultList = predictions.filter { it.first != "Not Leaf" }
-                    .filterIndexed { i, p -> i == 0 || p.second >= 0.10f }
-                    .take(2)
-                    .map { (disease, conf) ->
-                        Prediction(disease = disease, confidence = conf * 100f,
-                            treatment = DiseaseInfo.getTreatment(disease, "bn"))
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
+                    if (!isPlant) return@withContext PredictionResult.NotPaddy(context.getString(R.string.not_paddy_msg))
+
+                    val app = context.applicationContext as? PaddyCareApp
+                    val classifier = app?.classifier ?: PaddyClassifier(context)
+                    val lang = app?.settingsManager?.language?.value ?: "bn"
+
+                    val classResult = classifier.classify(bmp)
+                    val predictions = classResult.predictions
+                    if (predictions.isEmpty()) {
+                        return@withContext PredictionResult.Error("No prediction available from model.")
                     }
-                if (resultList.isEmpty()) PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
-                else PredictionResult.Success(resultList)
+
+                    val entropy = classifier.entropy(predictions.map { it.second })
+                    val topPred = predictions.first()
+
+                    if (DiseaseInfo.isRejectClass(topPred.first)) {
+                        return@withContext PredictionResult.NotPaddy(DiseaseInfo.getTreatment(topPred.first, lang))
+                    }
+
+                    if (classifier.isOOD(classResult.embedding, topPred.first)) {
+                        val oodMsg = if (lang == "en") {
+                            "This image resembles a paddy leaf, but the model cannot recognize it reliably.\nPlease provide a clearer photo of a paddy leaf."
+                        } else {
+                            "🚫 এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে চিনতে পারছে না।\nঅনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি দিন।"
+                        }
+                        return@withContext PredictionResult.NotPaddy(oodMsg)
+                    }
+
+                    if (topPred.second < PaddyClassifier.CONFIDENCE_THRESHOLD || entropy > classifier.entropyThreshold) {
+                        return@withContext PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
+                    }
+
+                    val resultList = predictions.filter { !DiseaseInfo.isRejectClass(it.first) }
+                        .filterIndexed { i, p -> i == 0 || p.second >= 0.10f }
+                        .take(2)
+                        .map { (disease, conf) ->
+                            Prediction(
+                                disease = disease,
+                                confidence = conf * 100f,
+                                treatment = DiseaseInfo.getTreatment(disease, lang)
+                            )
+                        }
+
+                    if (resultList.isEmpty()) PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
+                    else PredictionResult.Success(resultList)
+                }
+                onAnalyzeComplete(result, uri)
+            } catch (e: Throwable) {
+                Log.e("HomeScreen", "Inference error", e)
+                onAnalyzeComplete(
+                    PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"),
+                    uri
+                )
+            } finally {
+                isAnalyzing = false
             }
-            isAnalyzing = false
-            onAnalyzeComplete(result, uri)
         }
     }
 
@@ -589,11 +617,31 @@ private fun DiseaseQuickCard(
 private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = try {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         val source = ImageDecoder.createSource(context.contentResolver, uri)
-        ImageDecoder.decodeBitmap(source) { dec, _, _ ->
+        ImageDecoder.decodeBitmap(source) { dec, info, _ ->
             dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             dec.isMutableRequired = true
+            // Scale down to max 1024px to prevent memory spikes on large camera captures
+            val maxSide = maxOf(info.size.width, info.size.height)
+            if (maxSide > 1024) {
+                val scale = 1024f / maxSide
+                val targetW = (info.size.width * scale).toInt().coerceAtLeast(456)
+                val targetH = (info.size.height * scale).toInt().coerceAtLeast(456)
+                dec.setTargetSize(targetW, targetH)
+            }
         }
     } else {
-        MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, boundsOptions)
+        }
+        val maxSide = maxOf(boundsOptions.outWidth, boundsOptions.outHeight)
+        var sampleSize = 1
+        while (maxSide / (sampleSize * 2) >= 1024) {
+            sampleSize *= 2
+        }
+        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, decodeOptions)
+        }
     }
 } catch (e: Exception) { e.printStackTrace(); null }

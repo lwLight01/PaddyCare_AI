@@ -73,6 +73,21 @@ class PaddyClassifier(context: Context) {
         entropyThreshold = (0.75 * kotlin.math.ln(labels.size.coerceAtLeast(2).toDouble())).toFloat()
         
         loadClassStats(context)
+
+        // Verify that label count matches the model's logits output tensor
+        val outputCount = interpreter.outputTensorCount
+        for (i in 0 until outputCount) {
+            val shape = interpreter.getOutputTensor(i).shape()
+            if (shape.size == 2 && shape[1] != EMBEDDING_DIM) {
+                if (shape[1] != labels.size) {
+                    Log.w(
+                        "PaddyClassifier",
+                        "⚠️ Model output classes (${shape[1]}) != labels.txt size (${labels.size}). " +
+                        "Please re-export model.tflite and labels.txt together."
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -85,38 +100,46 @@ class PaddyClassifier(context: Context) {
         val resized = Bitmap.createScaledBitmap(squared, IMAGE_SIZE, IMAGE_SIZE, true)
         val inputBuffer = preprocessImage(resized)
 
-        // The TFLite model now has two outputs: logits and embedding.
-        // We need to figure out which output index corresponds to which.
+        // The TFLite model has two outputs: logits and embedding.
         val outputCount = interpreter.outputTensorCount
         val outputs = mutableMapOf<Int, Any>()
-        
+
         var logitsIndex = 0
         var embedIndex = 1
-        
+        var modelLogitsSize = labels.size
+
         for (i in 0 until outputCount) {
             val shape = interpreter.getOutputTensor(i).shape()
-            if (shape.size == 2 && shape[1] == labels.size) {
+            if (shape.size == 2 && shape[1] != EMBEDDING_DIM) {
                 logitsIndex = i
-                outputs[i] = Array(1) { FloatArray(labels.size) }
+                modelLogitsSize = shape[1]
+                outputs[i] = Array(1) { FloatArray(shape[1]) }
             } else if (shape.size == 2 && shape[1] == EMBEDDING_DIM) {
                 embedIndex = i
                 outputs[i] = Array(1) { FloatArray(EMBEDDING_DIM) }
             }
         }
-        
+
         val inputs = arrayOf(inputBuffer)
         interpreter.runForMultipleInputsOutputs(inputs, outputs)
 
-        val logitsArray = outputs[logitsIndex] as Array<FloatArray>
-        val embedArray = outputs[embedIndex] as Array<FloatArray>
-        
+        @Suppress("UNCHECKED_CAST")
+        val logitsArray = (outputs[logitsIndex] as? Array<FloatArray>)
+            ?: throw IllegalStateException("Failed to extract logits tensor from model output")
+        @Suppress("UNCHECKED_CAST")
+        val embedArray = (outputs[embedIndex] as? Array<FloatArray>)
+            ?: Array(1) { FloatArray(EMBEDDING_DIM) }
+
         val logits = logitsArray[0]
         val embedding = embedArray[0]
-        
+
         val probabilities = softmax(logits)
 
-        val predictions = labels.zip(probabilities.toList())
-            .sortedByDescending { it.second }
+        // Pair predictions up to the minimum of available labels and logits
+        val pairCount = minOf(labels.size, probabilities.size)
+        val predictions = (0 until pairCount).map { i ->
+            Pair(labels[i], probabilities[i])
+        }.sortedByDescending { it.second }
 
         return ClassifyResult(predictions, embedding)
     }
