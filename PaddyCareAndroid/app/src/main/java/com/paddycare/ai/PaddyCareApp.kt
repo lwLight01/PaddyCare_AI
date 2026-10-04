@@ -11,4 +11,8 @@ class PaddyCareApp : Application() {
     val database: AppDatabase by lazy {
         AppDatabase.getInstance(this)
     }
+
+    val settingsManager: com.paddycare.ai.data.SettingsManager by lazy {
+        com.paddycare.ai.data.SettingsManager(this)
+    }
 }

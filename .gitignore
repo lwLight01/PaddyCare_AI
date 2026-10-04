@@ -65,3 +65,10 @@ dataset_compressed/
 # Other ignored files
 implementation_plan.md
 Mathematical_Validation_References.md
+
+# Model weights / exported models (generate via train.py + export_tflite.py)
+*.tflite
+*.pth
+*.onnx
+*.onnx.data
+*.zip

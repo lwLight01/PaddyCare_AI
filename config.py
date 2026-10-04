@@ -22,8 +22,10 @@ WARMUP_EPOCHS = 10       # Phase-1: train classifier head only; Phase-2: fine-tu
 
 CLASS_NAMES = [
     "Bacterial Blight",
+    "Blast",
+    "Brown Spot",
     "Healthy",
-    # ── add new disease names here (alphabetical order!) ──
+    "Not Leaf"
 ]
 NUM_CLASSES = len(CLASS_NAMES)
 
@@ -41,7 +43,7 @@ OOD_ENTROPY_THRESHOLD = round(0.75 * math.log(max(NUM_CLASSES, 2)), 4)
 TOP_K                 = 3     # return up to 3 predictions (useful for 8+ classes)
 
 # Name of the reject class — update when a 'Not Leaf' class is added back
-# NOT_LEAF_CLASS = "Not Leaf"
+NOT_LEAF_CLASS = "Not Leaf"
 
 API_LOG_FILE      = os.path.join(LOG_DIR, "api.log")
 TRAIN_LOG_FILE    = os.path.join(LOG_DIR, "train.log")
@@ -82,6 +84,49 @@ TREATMENTS = {
             "৪. আশেপাশে রোগ থাকলে প্রতিরোধমূলক ছত্রাকনাশক দিন।"
         ),
     },
-    # "Not Leaf" treatment removed — add back when the class is re-introduced
+    "Blast": {
+        "en": (
+            "1. Spray Tricyclazole (0.1%) or Isoprothiolane fungicide.\n"
+            "2. Apply silicon-based fertilizer to boost resistance.\n"
+            "3. Avoid excess nitrogen fertilizer.\n"
+            "4. Drain field water periodically.\n"
+            "5. Use blast-resistant paddy varieties."
+        ),
+        "bn": (
+            "১. ট্রাইসাইক্লাজোল (০.১%) বা আইসোপ্রোথিওলেন ছত্রাকনাশক স্প্রে করুন।\n"
+            "২. সিলিকন-ভিত্তিক সার প্রয়োগ করুন।\n"
+            "৩. অতিরিক্ত নাইট্রোজেন সার এড়িয়ে চলুন।\n"
+            "৪. মাঠের পানি মাঝে মাঝে নিষ্কাশন করুন।\n"
+            "৫. ব্লাস্ট-প্রতিরোধী ধানের জাত ব্যবহার করুন।"
+        ),
+    },
+    "Brown Spot": {
+        "en": (
+            "1. Spray Mancozeb or Propiconazole fungicide.\n"
+            "2. Apply balanced potassium and silicon fertilizer.\n"
+            "3. Avoid water stress during the tillering stage.\n"
+            "4. Use resistant varieties.\n"
+            "5. Remove and burn infected plant debris."
+        ),
+        "bn": (
+            "১. ম্যানকোজেব বা প্রোপিকোনাজোল ছত্রাকনাশক স্প্রে করুন।\n"
+            "২. সুষম পটাশিয়াম ও সিলিকন সার প্রয়োগ করুন।\n"
+            "৩. কুশি পর্যায়ে পানির চাপ এড়িয়ে চলুন।\n"
+            "৪. প্রতিরোধী জাত ব্যবহার করুন।\n"
+            "৫. আক্রান্ত গাছের অবশিষ্ট পুড়িয়ে ফেলুন।"
+        ),
+    },
+    "Not Leaf": {
+        "en": (
+            "This image is not a paddy (rice) leaf.\n"
+            "PaddyCare can only diagnose diseases from paddy leaf photos.\n"
+            "Please upload a clear, close-up photo of a paddy leaf."
+        ),
+        "bn": (
+            "এই ছবিটি ধান (চাল) পাতার নয়।\n"
+            "PaddyCare শুধুমাত্র ধান পাতার ছবি থেকে রোগ নির্ণয় করতে পারে।\n"
+            "অনুগ্রহ করে ধান পাতার একটি স্পষ্ট ও কাছের ছবি আপলোড করুন।"
+        ),
+    },
 }
 

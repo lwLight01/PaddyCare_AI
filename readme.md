@@ -44,12 +44,6 @@ Evaluate the trained model against the validation set:
 python evaluate.py
 ```
 
-### Local Prediction (Optional)
-Test the model on a single image locally using the Python script:
-```bash
-python predict.py path/to/leaf.jpg
-```
-
 ---
 
 ## 2. Convert Model to TensorFlow Lite
@@ -100,7 +94,7 @@ Connect your Android phone via USB (with Developer Options / USB Debugging enabl
 ## 4. Publish to Google Play Store
 
 We have included a detailed step-by-step guide to publishing the App. 
-Please read the **[Publishing Guide](PaddyCareAndroid/PUBLISH_GUIDE.md)** for detailed instructions on:
+Please read the **[Publishing Guide](logs_md/android_PUBLISH_GUIDE.md)** for detailed instructions on:
 1. Creating a Google Play Developer Account
 2. Generating a Signed App Bundle (`.aab`) in Android Studio
 3. Creating Store Listing Assets

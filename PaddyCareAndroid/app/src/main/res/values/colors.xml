@@ -1,39 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Primary greens -->
-    <color name="green_dark">#0d4f2e</color>
-    <color name="green_mid">#28a165</color>
-    <color name="green_light">#6fcf97</color>
-    <color name="green_pale">#e8f5e9</color>
+    <color name="green_primary">#3D9E2A</color>
+    <color name="green_dark">#1E5C14</color>
+    <color name="green_mid">#2E7D1F</color>
+    <color name="green_light">#6CC14E</color>
+    <color name="green_bright">#7ED661</color>
+    <color name="green_pale">#D9F0CC</color>
+    <color name="green_ultra">#EDF7E8</color>
 
-    <!-- Gold accent -->
-    <color name="gold">#f59e0b</color>
-    <color name="gold_pale">#fef3c7</color>
-
-    <!-- Surfaces -->
-    <color name="bg">#f0f4f0</color>
-    <color name="surface">#ffffff</color>
-    <color name="white">#ffffff</color>
+    <!-- Surfaces - Light -->
+    <color name="bg_primary">#F2F8F0</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_tertiary">#E8F5E3</color>
+    <color name="white">#FFFFFF</color>
     <color name="black">#000000</color>
 
-    <!-- Text -->
-    <color name="text_main">#1e293b</color>
-    <color name="text_muted">#94a3b8</color>
+    <!-- Text - Light -->
+    <color name="text_primary">#0F2A08</color>
+    <color name="text_secondary">#3A5C30</color>
+    <color name="text_muted">#6A8A62</color>
+
+    <!-- Borders - Light -->
+    <color name="border_light">#D0EAC5</color>
+    <color name="border_mid">#A8D498</color>
+    <color name="divider">#E5F0E0</color>
 
     <!-- Severity -->
-    <color name="severity_high">#ef4444</color>
-    <color name="severity_high_bg">#fee2e2</color>
-    <color name="severity_high_text">#b91c1c</color>
-    <color name="severity_medium">#f59e0b</color>
-    <color name="severity_medium_bg">#fef3c7</color>
-    <color name="severity_medium_text">#92400e</color>
-    <color name="severity_low">#22c55e</color>
-    <color name="severity_low_bg">#dcfce7</color>
-    <color name="severity_low_text">#166534</color>
+    <color name="severity_high">#EF4444</color>
+    <color name="severity_high_bg">#FEF2F2</color>
+    <color name="severity_high_text">#B91C1C</color>
+    <color name="severity_medium">#F59E0B</color>
+    <color name="severity_medium_bg">#FFFBEB</color>
+    <color name="severity_medium_text">#92400E</color>
+    <color name="severity_low">#3D9E2A</color>
+    <color name="severity_low_bg">#D9F0CC</color>
+    <color name="severity_low_text">#1E5C14</color>
 
-    <!-- Warning -->
-    <color name="warning_bg">#fffbeb</color>
-    <color name="warning_border">#fde68a</color>
-    <color name="warning_title">#92400e</color>
-    <color name="warning_text">#78350f</color>
+    <!-- Misc -->
+    <color name="gold">#E8A320</color>
+    <color name="warning_bg">#FFFBEB</color>
+    <color name="warning_border">#FDE68A</color>
+    <color name="warning_title">#92400E</color>
+    <color name="warning_text">#78350F</color>
 </resources>

@@ -10,12 +10,21 @@ object DiseaseInfo {
     val DISEASE_BN = mapOf(
         "Bacterial Blight" to "ব্যাকটেরিয়াল ব্লাইট",
         "Blast" to "ব্লাস্ট রোগ",
+        "Brown Spot" to "বাদামী দাগ",
         "Healthy" to "সুস্থ গাছ",
         "Not Leaf" to "ধানের পাতা নয়",
     )
 
     /** Treatments in Bengali */
     val TREATMENTS_BN = mapOf(
+        "Brown Spot" to """
+            ১. ম্যানকোজেব বা প্রোপিকোনাজোল ছত্রাকনাশক স্প্রে করুন।
+            ২. সুষম পটাশিয়াম ও সিলিকন সার প্রয়োগ করুন।
+            ৩. কুশি পর্যায়ে পানির চাপ এড়িয়ে চলুন।
+            ৪. প্রতিরোধী জাত ব্যবহার করুন।
+            ৫. আক্রান্ত গাছের অবশিষ্ট পুড়িয়ে ফেলুন।
+        """.trimIndent(),
+
         "Blast" to """
             ১. ট্রাইসাইক্লাজোল (০.১%) বা আইসোপ্রোথিওলেন ছত্রাকনাশক স্প্রে করুন।
             ২. সিলিকন-ভিত্তিক সার প্রয়োগ করুন।
@@ -49,6 +58,14 @@ object DiseaseInfo {
 
     /** Treatments in English */
     val TREATMENTS_EN = mapOf(
+        "Brown Spot" to """
+            1. Spray Mancozeb or Propiconazole fungicide.
+            2. Apply balanced potassium and silicon fertilizer.
+            3. Avoid water stress during the tillering stage.
+            4. Use resistant varieties.
+            5. Remove and burn infected plant debris.
+        """.trimIndent(),
+
         "Blast" to """
             1. Spray Tricyclazole (0.1%) or Isoprothiolane fungicide.
             2. Apply silicon-based fertilizer to boost resistance.
