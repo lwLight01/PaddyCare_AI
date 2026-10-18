@@ -16,14 +16,26 @@ Requirements:
 
 import os
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import shutil
 import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 
+import json
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import IMAGE_SIZE, MODEL_DIR, MODEL_PATH, CLASS_STATS_PATH, DISEASES_JSON_PATH
+from config import (
+    IMAGE_SIZE, MODEL_DIR, MODEL_PATH, CLASS_STATS_PATH, DISEASES_JSON_PATH,
+    MODEL_META_PATH, NORM_MEAN, NORM_STD, CONFIDENCE_THRESHOLD, ENTROPY_FACTOR,
+)
 from model import build_model as _build_model, DualOutputWrapper
 
 PTH_PATH    = MODEL_PATH
@@ -198,6 +210,39 @@ def step4_validate_tflite(class_names: list):
     print("  ✅ TFLite model works correctly!")
 
 
+def validate_diseases_json(class_names: list):
+    """Ensure every class known to the model has a matching definition in diseases.json."""
+    if not os.path.exists(DISEASES_JSON_PATH):
+        raise FileNotFoundError(f"Missing {DISEASES_JSON_PATH}. Required for app disease information.")
+    with open(DISEASES_JSON_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    diseases = data.get("diseases", data) if isinstance(data, dict) else {}
+    missing = [c for c in class_names if c not in diseases and c != "Not Leaf"]
+    if missing:
+        raise ValueError(
+            f"The following model classes are missing from {DISEASES_JSON_PATH}: {missing}\n"
+            "Please update diseases.json before exporting to Android."
+        )
+    print(f"  ✅ diseases.json validated ({len(class_names)} classes covered)")
+
+
+def write_model_meta(class_names: list, backbone: str = "efficientnet_b5"):
+    """Write model_meta.json containing preprocessing constants and thresholds."""
+    meta = {
+        "image_size": IMAGE_SIZE,
+        "mean": NORM_MEAN,
+        "std": NORM_STD,
+        "backbone": backbone,
+        "classes": class_names,
+        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "entropy_factor": ENTROPY_FACTOR,
+    }
+    with open(MODEL_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  ✅ Model metadata saved: {MODEL_META_PATH}")
+    return MODEL_META_PATH
+
+
 def create_labels_file(class_names: list):
     """Create labels.txt matching the model checkpoint classes."""
     with open(LABELS_PATH, "w", encoding="utf-8") as f:
@@ -217,6 +262,8 @@ def copy_assets_to_android():
         (TFLITE_PATH, "model.tflite"),
         (LABELS_PATH, "labels.txt"),
     ]
+    if os.path.exists(MODEL_META_PATH):
+        files_to_copy.append((MODEL_META_PATH, "model_meta.json"))
     if os.path.exists(CLASS_STATS_PATH):
         files_to_copy.append((CLASS_STATS_PATH, "class_stats.json"))
     if os.path.exists(DISEASES_JSON_PATH):
@@ -243,6 +290,8 @@ def main():
     print("=" * 60)
 
     model, class_names = step1_load_pytorch()
+    validate_diseases_json(class_names)
+    write_model_meta(class_names)
     step2_export_onnx(model)
     step3_convert_tflite(quantize=args.quantize)
     step4_validate_tflite(class_names)

@@ -105,26 +105,31 @@ fun HomeScreen(
         val uri = imageUri ?: return
         isAnalyzing = true
         coroutineScope.launch {
-            try {
-                val result = withContext(Dispatchers.Default) {
-                    val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
-                    if (!isPlant) return@withContext PredictionResult.NotPaddy(context.getString(R.string.not_paddy_msg))
-
+            val (result, scanUri) = try {
+                withContext(Dispatchers.Default) {
                     val app = context.applicationContext as? PaddyCareApp
                     val classifier = app?.classifier ?: PaddyClassifier(context)
                     val lang = app?.settingsManager?.language?.value ?: "bn"
 
+                    val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
+                    if (!isPlant) {
+                        val saved = saveScanBitmap(context, bmp)
+                        return@withContext Pair(PredictionResult.NotPaddy(context.getString(R.string.not_paddy_msg)), saved)
+                    }
+
                     val classResult = classifier.classify(bmp)
                     val predictions = classResult.predictions
                     if (predictions.isEmpty()) {
-                        return@withContext PredictionResult.Error("No prediction available from model.")
+                        val saved = saveScanBitmap(context, bmp)
+                        return@withContext Pair(PredictionResult.Error("No prediction available from model."), saved)
                     }
 
                     val entropy = classifier.entropy(predictions.map { it.second })
                     val topPred = predictions.first()
+                    val saved = saveScanBitmap(context, bmp)
 
                     if (DiseaseInfo.isRejectClass(topPred.first)) {
-                        return@withContext PredictionResult.NotPaddy(DiseaseInfo.getTreatment(topPred.first, lang))
+                        return@withContext Pair(PredictionResult.NotPaddy(DiseaseInfo.getTreatment(topPred.first, lang)), saved)
                     }
 
                     if (classifier.isOOD(classResult.embedding, topPred.first)) {
@@ -133,11 +138,11 @@ fun HomeScreen(
                         } else {
                             "🚫 এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে চিনতে পারছে না।\nঅনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি দিন।"
                         }
-                        return@withContext PredictionResult.NotPaddy(oodMsg)
+                        return@withContext Pair(PredictionResult.NotPaddy(oodMsg), saved)
                     }
 
-                    if (topPred.second < PaddyClassifier.CONFIDENCE_THRESHOLD || entropy > classifier.entropyThreshold) {
-                        return@withContext PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
+                    if (topPred.second < classifier.confidenceThreshold || entropy > classifier.entropyThreshold) {
+                        return@withContext Pair(PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg)), saved)
                     }
 
                     val resultList = predictions.filter { !DiseaseInfo.isRejectClass(it.first) }
@@ -151,18 +156,24 @@ fun HomeScreen(
                             )
                         }
 
-                    if (resultList.isEmpty()) PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
-                    else PredictionResult.Success(resultList)
+                    val finalResult = if (resultList.isEmpty()) {
+                        PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
+                    } else {
+                        PredictionResult.Success(resultList)
+                    }
+                    Pair(finalResult, saved)
                 }
-                onAnalyzeComplete(result, uri)
             } catch (e: Throwable) {
                 Log.e("HomeScreen", "Inference error", e)
-                onAnalyzeComplete(
-                    PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"),
-                    uri
-                )
+                Pair(PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"), uri)
             } finally {
                 isAnalyzing = false
+            }
+
+            try {
+                onAnalyzeComplete(result, scanUri)
+            } catch (e: Throwable) {
+                Log.e("HomeScreen", "onAnalyzeComplete error", e)
             }
         }
     }
@@ -613,6 +624,19 @@ private fun DiseaseQuickCard(
     }
 }
 
+private fun saveScanBitmap(context: android.content.Context, bitmap: Bitmap): Uri {
+    return try {
+        val scansDir = java.io.File(context.filesDir, "scans").apply { mkdirs() }
+        val scanFile = java.io.File(scansDir, "scan_${System.currentTimeMillis()}.jpg")
+        scanFile.outputStream().use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        }
+        Uri.fromFile(scanFile)
+    } catch (e: Exception) {
+        Uri.EMPTY
+    }
+}
+
 @Suppress("DEPRECATION")
 private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = try {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -620,12 +644,12 @@ private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = tr
         ImageDecoder.decodeBitmap(source) { dec, info, _ ->
             dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             dec.isMutableRequired = true
-            // Scale down to max 1024px to prevent memory spikes on large camera captures
+            // Uniformly downscale to max 1024px preserving original aspect ratio
             val maxSide = maxOf(info.size.width, info.size.height)
             if (maxSide > 1024) {
                 val scale = 1024f / maxSide
-                val targetW = (info.size.width * scale).toInt().coerceAtLeast(456)
-                val targetH = (info.size.height * scale).toInt().coerceAtLeast(456)
+                val targetW = (info.size.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (info.size.height * scale).toInt().coerceAtLeast(1)
                 dec.setTargetSize(targetW, targetH)
             }
         }
@@ -640,8 +664,31 @@ private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = tr
             sampleSize *= 2
         }
         val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        context.contentResolver.openInputStream(uri)?.use {
+        val decoded = context.contentResolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, decodeOptions)
+        } ?: return null
+
+        val orientation = try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                android.media.ExifInterface(stream).getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+            } ?: android.media.ExifInterface.ORIENTATION_NORMAL
+        } catch (e: Exception) {
+            android.media.ExifInterface.ORIENTATION_NORMAL
+        }
+
+        val matrix = android.graphics.Matrix()
+        when (orientation) {
+            android.media.ExifInterface.ORIENTATION_ROTATE_90  -> matrix.postRotate(90f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        }
+        if (!matrix.isIdentity) {
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        } else {
+            decoded
         }
     }
 } catch (e: Exception) { e.printStackTrace(); null }

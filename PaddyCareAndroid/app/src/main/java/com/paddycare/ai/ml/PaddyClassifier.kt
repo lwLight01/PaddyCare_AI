@@ -35,33 +35,38 @@ class PaddyClassifier(context: Context) {
         private const val MODEL_FILE = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
         private const val STATS_FILE = "class_stats.json"
-        private const val IMAGE_SIZE = 456  // Must match Python config.py IMAGE_SIZE
+        private const val META_FILE  = "model_meta.json"
+        const val IMAGE_SIZE = 456  // Fallback default
         private const val PIXEL_SIZE = 3 // RGB
         private const val BYTES_PER_FLOAT = 4
         private const val EMBEDDING_DIM = 128
 
-        // ImageNet normalization values (same as training)
-        private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
-        private val STD  = floatArrayOf(0.229f, 0.224f, 0.225f)
+        // Fallback ImageNet normalization values
+        private val DEFAULT_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
+        private val DEFAULT_STD  = floatArrayOf(0.229f, 0.224f, 0.225f)
 
-        const val CONFIDENCE_THRESHOLD = 0.60f  // 60%
-        // ENTROPY_THRESHOLD is set after labels are loaded (see init block)
+        const val CONFIDENCE_THRESHOLD = 0.60f  // 60% fallback
     }
 
     private val interpreter: Interpreter
-    private val labels: List<String>
+    val labels: List<String>
+
+    var imageSize: Int = IMAGE_SIZE
+        private set
+    var mean: FloatArray = DEFAULT_MEAN
+        private set
+    var std: FloatArray = DEFAULT_STD
+        private set
+    var confidenceThreshold: Float = CONFIDENCE_THRESHOLD
+        private set
+    var entropyThreshold: Float = 0f
+        private set
 
     // Mahalanobis statistics
     private var classMeans = mapOf<String, FloatArray>()
     private var precisionMatrix = Array(EMBEDDING_DIM) { FloatArray(EMBEDDING_DIM) }
     private var mahalanobisThreshold = Float.MAX_VALUE
     private var statsLoaded = false
-
-    /**
-     * OOD entropy threshold — computed dynamically as 0.75 × ln(numClasses)
-     * to match the Python config.py formula exactly.
-     */
-    val entropyThreshold: Float
 
     init {
         val model = loadModelFile(context)
@@ -70,8 +75,7 @@ class PaddyClassifier(context: Context) {
         }
         interpreter = Interpreter(model, options)
         labels = loadLabels(context)
-        entropyThreshold = (0.75 * kotlin.math.ln(labels.size.coerceAtLeast(2).toDouble())).toFloat()
-        
+        loadModelMeta(context)
         loadClassStats(context)
 
         // Verify that label count matches the model's logits output tensor
@@ -95,9 +99,9 @@ class PaddyClassifier(context: Context) {
      * @return ClassifyResult containing predictions (sorted) and the 128-dim embedding.
      */
     fun classify(bitmap: Bitmap): ClassifyResult {
-        // Match Python pipeline: PadToSquare() → Resize(IMAGE_SIZE) → Normalize
+        // Match Python pipeline: PadToSquare() → Resize(imageSize) → Normalize
         val squared = padToSquare(bitmap)
-        val resized = Bitmap.createScaledBitmap(squared, IMAGE_SIZE, IMAGE_SIZE, true)
+        val resized = Bitmap.createScaledBitmap(squared, imageSize, imageSize, true)
         val inputBuffer = preprocessImage(resized)
 
         // The TFLite model has two outputs: logits and embedding.
@@ -171,6 +175,38 @@ class PaddyClassifier(context: Context) {
 
     // ── Private helpers ─────────────────────────────────────────────────────
 
+    private fun loadModelMeta(context: Context) {
+        var entropyFactor = 0.75
+        try {
+            val jsonStr = context.assets.open(META_FILE).bufferedReader().use { it.readText() }
+            val json = JSONObject(jsonStr)
+            imageSize = json.optInt("image_size", IMAGE_SIZE)
+            confidenceThreshold = json.optDouble("confidence_threshold", CONFIDENCE_THRESHOLD.toDouble()).toFloat()
+            entropyFactor = json.optDouble("entropy_factor", 0.75)
+
+            val meanArr = json.optJSONArray("mean")
+            if (meanArr != null && meanArr.length() == 3) {
+                mean = floatArrayOf(
+                    meanArr.getDouble(0).toFloat(),
+                    meanArr.getDouble(1).toFloat(),
+                    meanArr.getDouble(2).toFloat()
+                )
+            }
+            val stdArr = json.optJSONArray("std")
+            if (stdArr != null && stdArr.length() == 3) {
+                std = floatArrayOf(
+                    stdArr.getDouble(0).toFloat(),
+                    stdArr.getDouble(1).toFloat(),
+                    stdArr.getDouble(2).toFloat()
+                )
+            }
+            Log.i("PaddyClassifier", "Loaded model_meta.json (imageSize=$imageSize, confThreshold=$confidenceThreshold)")
+        } catch (e: Exception) {
+            Log.d("PaddyClassifier", "Using default model metadata: ${e.message}")
+        }
+        entropyThreshold = (entropyFactor * kotlin.math.ln(labels.size.coerceAtLeast(2).toDouble())).toFloat()
+    }
+
     private fun loadClassStats(context: Context) {
         try {
             val jsonStr = context.assets.open(STATS_FILE).bufferedReader().use { it.readText() }
@@ -223,21 +259,21 @@ class PaddyClassifier(context: Context) {
      *   PadToSquare() → Resize(456) → Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
      */
     private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * IMAGE_SIZE * IMAGE_SIZE * PIXEL_SIZE * BYTES_PER_FLOAT)
+        val buffer = ByteBuffer.allocateDirect(1 * imageSize * imageSize * PIXEL_SIZE * BYTES_PER_FLOAT)
         buffer.order(ByteOrder.nativeOrder())
 
-        val pixels = IntArray(IMAGE_SIZE * IMAGE_SIZE)
-        bitmap.getPixels(pixels, 0, IMAGE_SIZE, 0, 0, IMAGE_SIZE, IMAGE_SIZE)
+        val pixels = IntArray(imageSize * imageSize)
+        bitmap.getPixels(pixels, 0, imageSize, 0, 0, imageSize, imageSize)
 
         for (pixel in pixels) {
             val r = ((pixel shr 16) and 0xFF) / 255.0f
             val g = ((pixel shr 8) and 0xFF) / 255.0f
             val b = (pixel and 0xFF) / 255.0f
 
-            // Normalize with ImageNet statistics
-            buffer.putFloat((r - MEAN[0]) / STD[0])
-            buffer.putFloat((g - MEAN[1]) / STD[1])
-            buffer.putFloat((b - MEAN[2]) / STD[2])
+            // Normalize with model statistics
+            buffer.putFloat((r - mean[0]) / std[0])
+            buffer.putFloat((g - mean[1]) / std[1])
+            buffer.putFloat((b - mean[2]) / std[2])
         }
 
         buffer.rewind()

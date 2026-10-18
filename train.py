@@ -4,6 +4,8 @@ import time
 import shutil
 import random
 import logging
+import argparse
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,13 +15,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import (
-    MODEL_PATH, MODEL_DIR, LOG_DIR, EPOCHS, LEARNING_RATE,
-    TRAIN_LOG_FILE, ACCUM_STEPS, WARMUP_EPOCHS, BATCH_SIZE
+    MODEL_PATH, MODEL_DIR, RUNS_DIR, BACKUP_DIR, LOG_DIR,
+    EPOCHS as DEFAULT_EPOCHS, LEARNING_RATE,
+    TRAIN_LOG_FILE, ACCUM_STEPS, WARMUP_EPOCHS as DEFAULT_WARMUP, BATCH_SIZE,
+    IMAGE_SIZE,
 )
 from model import build_model, unfreeze_all
 from dataset_utils import get_dataloaders
+from log_utils import setup_logging
 
-# ── Seed for reproducibility ──
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
@@ -27,27 +31,11 @@ torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-logging.basicConfig(
-    filename=TRAIN_LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
-)
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-# Avoid duplicate console handlers if re-run
-if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logging.getLogger().handlers):
-    logging.getLogger().addHandler(console)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 use_amp = (device.type == "cuda")
-logging.info(f"Device: {device} | Mixed Precision (AMP): {use_amp}")
 
 
-def save_training_curves(history: dict):
+def save_training_curves(history: dict, save_dir: str):
     epochs = range(1, len(history["train_loss"]) + 1)
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -70,7 +58,7 @@ def save_training_curves(history: dict):
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    save_path = os.path.join(LOG_DIR, "training_curves.png")
+    save_path = os.path.join(save_dir, "training_curves.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
     logging.info(f"Training curves saved -> {save_path}")
@@ -88,7 +76,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, phase: int, acc
     for batch_idx, (images, labels) in enumerate(loader):
         images, labels = images.to(device), labels.to(device)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             outputs = model(images)
             loss = criterion(outputs, labels) / accum_steps
 
@@ -123,7 +111,7 @@ def validate(model, loader, criterion):
     with torch.no_grad():
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 outputs = model(images)
                 loss    = criterion(outputs, labels)
 
@@ -135,40 +123,75 @@ def validate(model, loader, criterion):
     total = len(all_labels)
     epoch_loss = running_loss / total
     epoch_acc  = 100.0 * accuracy_score(all_labels, all_preds)
-    macro_f1   = f1_score(all_labels, all_preds, average="macro")
+    macro_f1   = f1_score(all_labels, all_preds, average="macro", zero_division=0)
 
     return epoch_loss, epoch_acc, macro_f1
 
 
-def train():
-    # ── Checkpoint safety: backup previous model.pth if it exists ──
-    if os.path.exists(MODEL_PATH):
-        backup_path = os.path.join(MODEL_DIR, "model_backup.pth")
-        try:
-            shutil.copy2(MODEL_PATH, backup_path)
-            logging.info(f"Backed up existing model to: {backup_path}")
-        except Exception as e:
-            logging.warning(f"Could not backup existing model: {e}")
+def should_promote_checkpoint(new_meta: dict, current_path: str = MODEL_PATH) -> tuple[bool, str]:
+    """
+    Decides whether to promote a newly trained run model to MODEL_PATH.
+    Safety rules:
+      1. If MODEL_PATH does not exist: promote.
+      2. If class lists differ: promote.
+      3. If old checkpoint lacks val_macro_f1: promote.
+      4. If new val_macro_f1 >= old val_macro_f1: promote.
+      5. Otherwise: reject promotion to protect production weights.
+    """
+    if not os.path.exists(current_path):
+        return True, "No existing model.pth found; promoting new model."
 
-    loaders, class_names, train_dataset = get_dataloaders()
+    try:
+        old_cp = torch.load(current_path, map_location="cpu", weights_only=True)
+    except Exception as e:
+        return True, f"Could not inspect current checkpoint ({e}); promoting new model."
+
+    old_classes = old_cp.get("class_names")
+    new_classes = new_meta.get("class_names")
+    if old_classes != new_classes:
+        return True, f"Class list changed ({old_classes} -> {new_classes}); promoting new model."
+
+    old_f1 = old_cp.get("val_macro_f1")
+    if old_f1 is None:
+        old_acc = old_cp.get("val_acc", 0.0)
+        return True, f"Current checkpoint lacks val_macro_f1 (acc={old_acc:.2f}%); promoting new model."
+
+    new_f1 = new_meta.get("val_macro_f1", 0.0)
+    if new_f1 >= old_f1:
+        return True, f"New Macro-F1 ({new_f1:.4f}) >= Current ({old_f1:.4f}); promoting."
+    else:
+        return False, f"Current Macro-F1 ({old_f1:.4f}) is higher than New ({new_f1:.4f}); keeping current."
+
+
+def train(
+    epochs: int = DEFAULT_EPOCHS,
+    warmup_epochs: int = DEFAULT_WARMUP,
+    subset_per_class: int = 0,
+    smoke: bool = False,
+    extract_stats: bool = True,
+):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(RUNS_DIR, f"run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    loaders, class_names, _ = get_dataloaders(max_per_class=subset_per_class)
     num_classes = len(class_names)
 
-    # Note: WeightedRandomSampler already balances batches, so we use standard smoothed loss
-    # to avoid compound double-weighting (which over-corrects when scaling to 10+ classes).
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-
     model = build_model(num_classes=num_classes, pretrained=True).to(device)
 
-    # Phase 1: train only classifier head
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=LEARNING_RATE,
         weight_decay=1e-4,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=max(1, WARMUP_EPOCHS), T_mult=1, eta_min=1e-6
+        optimizer, T_0=max(1, warmup_epochs), T_mult=1, eta_min=1e-6
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     history = {
         "train_loss": [], "train_acc": [],
@@ -181,18 +204,25 @@ def train():
     best_epoch    = 0
     start_time    = time.time()
     phase         = 1
+    run_best_model_path = os.path.join(run_dir, "model.pth")
 
+    effective_batch = BATCH_SIZE * ACCUM_STEPS
     logging.info("=" * 60)
-    logging.info("PaddyCare AI - Training Started (EfficientNet-B5)")
+    logging.info(f"PaddyCare AI - Training Started (EfficientNet-B5)")
+    logging.info(f"Run output dir : {run_dir}")
+    logging.info(f"Device         : {device} | AMP: {use_amp}")
     logging.info(f"Classes        : {class_names} ({num_classes} total)")
-    logging.info(f"Epochs         : {EPOCHS}  |  LR: {LEARNING_RATE}")
-    logging.info(f"Warmup epochs  : {WARMUP_EPOCHS}  (Phase-1 classifier only)")
-    logging.info(f"Accum steps    : {ACCUM_STEPS}  (effective batch = {BATCH_SIZE * ACCUM_STEPS})")
+    logging.info(f"Epochs         : {epochs}  |  LR: {LEARNING_RATE}")
+    logging.info(f"Warmup epochs  : {warmup_epochs} (Phase 1 classifier only)")
+    logging.info(f"Accum steps    : {ACCUM_STEPS} (effective batch = {effective_batch})")
+    if subset_per_class > 0:
+        logging.info(f"Subset limit   : {subset_per_class} images per class")
+    if smoke:
+        logging.info("SMOKE MODE     : Enabled (weights will NOT overwrite production model.pth)")
     logging.info("=" * 60)
 
-    for epoch in range(1, EPOCHS + 1):
-        # ── Phase transition: enter Phase 2 after warmup ──
-        if epoch == WARMUP_EPOCHS + 1 and phase == 1:
+    for epoch in range(1, epochs + 1):
+        if epoch == warmup_epochs + 1 and phase == 1:
             phase = 2
             logging.info("\n" + "─" * 60)
             logging.info(f"  ➤ PHASE 2 STARTED (epoch {epoch}): Unfreezing all layers")
@@ -200,18 +230,17 @@ def train():
             logging.info("─" * 60)
 
             unfreeze_all(model)
-
-            # Differential learning rates for fine-tuning
             optimizer = torch.optim.AdamW([
                 {"params": model.features.parameters(), "lr": 1e-5},
                 {"params": model.classifier.parameters(), "lr": 1e-4},
             ], weight_decay=1e-4)
 
+            remaining_epochs = max(1, epochs - warmup_epochs)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=max(1, EPOCHS - WARMUP_EPOCHS), T_mult=1, eta_min=1e-7
+                optimizer, T_0=remaining_epochs, T_mult=1, eta_min=1e-7
             )
 
-        logging.info(f"\nEpoch [{epoch}/{EPOCHS}]  Phase {phase}")
+        logging.info(f"\nEpoch [{epoch}/{epochs}]  Phase {phase}")
 
         t_loss, t_acc = train_one_epoch(model, loaders["train"], criterion, optimizer, scaler, phase)
         v_loss, v_acc, v_f1 = validate(model, loaders["val"], criterion)
@@ -224,51 +253,92 @@ def train():
         history["val_acc"].append(v_acc)
         history["val_macro_f1"].append(v_f1)
 
-        logging.info(f"  Train  -> Loss: {t_loss:.4f}  Acc: {t_acc:.2f}%")
-        logging.info(f"  Val    -> Loss: {v_loss:.4f}  Acc: {v_acc:.2f}%  Macro-F1: {v_f1:.4f}")
+        logging.info(f"  Train -> Loss: {t_loss:.4f}  Acc: {t_acc:.2f}%")
+        logging.info(f"  Val   -> Loss: {v_loss:.4f}  Acc: {v_acc:.2f}%  Macro-F1: {v_f1:.4f}")
 
-        # Save checkpoint based on Macro-F1 (balanced across all classes)
-        if v_f1 > best_macro_f1:
+        if v_f1 > best_macro_f1 or epoch == 1:
             best_macro_f1 = v_f1
             best_val_acc  = v_acc
             best_epoch    = epoch
-            torch.save(
-                {
-                    "epoch":                epoch,
-                    "model_state_dict":     model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_acc":              v_acc,
-                    "val_macro_f1":         v_f1,
-                    "class_names":          class_names,
-                    "num_classes":          num_classes,
-                    "backbone":             "efficientnet_b5",
-                    "image_size":           456,
-                },
-                MODEL_PATH,
-            )
-            logging.info(f"  [SAVED] Best model at epoch {epoch} (Val Acc: {v_acc:.2f}%, Macro-F1: {v_f1:.4f})")
+            save_payload = {
+                "epoch":                epoch,
+                "model_state_dict":     model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_acc":              v_acc,
+                "val_macro_f1":         v_f1,
+                "class_names":          class_names,
+                "num_classes":          num_classes,
+                "backbone":             "efficientnet_b5",
+                "image_size":           IMAGE_SIZE,
+                "timestamp":            timestamp,
+            }
+            torch.save(save_payload, run_best_model_path)
+            logging.info(f"  [SAVED] Run best model at epoch {epoch} (Acc: {v_acc:.2f}%, F1: {v_f1:.4f})")
 
     elapsed = time.time() - start_time
     logging.info("\n" + "=" * 60)
-    logging.info(f"Training complete in {elapsed/60:.1f} min")
+    logging.info(f"Training finished in {elapsed/60:.1f} min")
     logging.info(f"Best Val Macro-F1: {best_macro_f1:.4f} (Acc: {best_val_acc:.2f}%, Epoch {best_epoch})")
 
-    history_path = os.path.join(LOG_DIR, "history.json")
+    history_path = os.path.join(run_dir, "history.json")
     with open(history_path, "w") as f:
         json.dump(history, f, indent=2)
 
-    save_training_curves(history)
-    print(f"\n[train] Model saved to   : {MODEL_PATH}")
-    print(f"[train] Training curves  : {LOG_DIR}/training_curves.png")
+    save_training_curves(history, run_dir)
+    save_training_curves(history, LOG_DIR)
+
+    # ── Checkpoint Promotion Safety Check ──
+    best_meta = {
+        "val_macro_f1": best_macro_f1,
+        "val_acc": best_val_acc,
+        "class_names": class_names,
+    }
+    if smoke:
+        logging.info(f"Smoke test complete. Run model kept in {run_best_model_path} (not promoted).")
+        return run_best_model_path
+
+    promote, reason = should_promote_checkpoint(best_meta, MODEL_PATH)
+    logging.info(f"[Checkpoint Safety] {reason}")
+
+    if promote:
+        if os.path.exists(MODEL_PATH):
+            backup_file = os.path.join(BACKUP_DIR, f"model_backup_{timestamp}.pth")
+            shutil.copy2(MODEL_PATH, backup_file)
+            logging.info(f"Previous production checkpoint backed up to: {backup_file}")
+
+        shutil.copy2(run_best_model_path, MODEL_PATH)
+        logging.info(f"PROMOTED new best model -> {MODEL_PATH}")
+    else:
+        logging.info(f"Run best model remains in {run_best_model_path}; {MODEL_PATH} was preserved.")
+
+    # ── OOD Statistics Extraction ──
+    target_for_stats = MODEL_PATH if promote else run_best_model_path
+    if extract_stats:
+        try:
+            import extract_embeddings
+            logging.info("\nStarting OOD embedding stats extraction...")
+            extract_embeddings.extract_and_save(model_path=target_for_stats)
+        except Exception as e:
+            logging.warning(f"Could not extract embeddings automatically: {e}")
+            logging.info("You can run manually: python extract_embeddings.py")
+
+    return target_for_stats
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="Train PaddyCare AI EfficientNet-B5 classifier")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Total training epochs")
+    parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP, help="Phase 1 warmup epochs")
+    parser.add_argument("--subset", type=int, default=0, help="Limit images per class (0 = full dataset)")
+    parser.add_argument("--smoke", action="store_true", help="Quick dry run; do not promote checkpoint")
+    parser.add_argument("--no-stats", action="store_true", help="Skip OOD stats extraction at the end")
+    args = parser.parse_args()
 
-    # After training completes, extract embeddings for Mahalanobis OOD detection
-    try:
-        import extract_embeddings
-        extract_embeddings.extract_and_save()
-    except Exception as e:
-        print(f"\n⚠️ Could not extract embeddings automatically: {e}")
-        print("Please run manually: python extract_embeddings.py")
+    setup_logging(TRAIN_LOG_FILE)
+    train(
+        epochs=args.epochs,
+        warmup_epochs=args.warmup,
+        subset_per_class=args.subset,
+        smoke=args.smoke,
+        extract_stats=not args.no_stats,
+    )

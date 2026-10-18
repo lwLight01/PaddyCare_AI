@@ -4,13 +4,14 @@ import torch
 import numpy as np
 from PIL import ImageFile
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 import torchvision.transforms.functional as TF
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 from config import (
     TRAIN_DIR, VAL_DIR, TEST_DIR,
-    IMAGE_SIZE, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, VALID_EXTENSIONS
+    IMAGE_SIZE, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY, VALID_EXTENSIONS,
+    NORM_MEAN, NORM_STD,
 )
 
 
@@ -32,8 +33,7 @@ train_transform = transforms.Compose([
     transforms.RandomVerticalFlip(p=0.2),
     transforms.TrivialAugmentWide(),          # state-of-the-art auto-augmentation
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
+    transforms.Normalize(mean=NORM_MEAN, std=NORM_STD),
     transforms.RandomErasing(p=0.1, scale=(0.02, 0.08)),  # mild cutout for regularisation
 ])
 
@@ -41,105 +41,113 @@ val_transform = transforms.Compose([
     PadToSquare(),
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
+    transforms.Normalize(mean=NORM_MEAN, std=NORM_STD),
 ])
 
 
 class SafeImageFolder(datasets.ImageFolder):
     """
-    Subclass of ImageFolder that automatically ignores empty class subdirectories.
-    Prevents FileNotFoundError when empty placeholder class folders exist.
+    ImageFolder that
+      1. ignores class sub-directories that contain no images (so empty placeholder
+         folders never crash training), and
+      2. can be forced to use a fixed class list (``classes=``). Val/test sets must
+         use the TRAIN class list so label indices always agree, even when a newly
+         added class has no val/test images yet.
     """
+    def __init__(self, root, transform=None, classes=None, **kwargs):
+        self._forced_classes = list(classes) if classes is not None else None
+        # Newer torchvision raises on classes with zero images unless allow_empty=True.
+        try:
+            super().__init__(root, transform=transform, allow_empty=True, **kwargs)
+        except TypeError:
+            super().__init__(root, transform=transform, **kwargs)
+
     def find_classes(self, directory: str):
-        classes = []
-        if not os.path.isdir(directory):
-            return [], {}
-
-        for entry in os.scandir(directory):
-            if entry.is_dir():
-                has_images = any(
-                    f.name.lower().endswith(VALID_EXTENSIONS)
-                    for f in os.scandir(entry.path)
-                    if f.is_file()
-                )
-                if has_images:
-                    classes.append(entry.name)
-
-        classes.sort()
+        if self._forced_classes is not None:
+            classes = self._forced_classes
+        else:
+            classes = []
+            if os.path.isdir(directory):
+                for entry in os.scandir(directory):
+                    if entry.is_dir() and any(
+                        f.name.lower().endswith(VALID_EXTENSIONS)
+                        for f in os.scandir(entry.path) if f.is_file()
+                    ):
+                        classes.append(entry.name)
+            classes.sort()
         class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
         return classes, class_to_idx
 
 
-def get_class_weights(dataset: datasets.ImageFolder) -> torch.Tensor:
-    """Compute inverse-frequency class weights."""
+def subset_per_class(dataset: datasets.ImageFolder, max_per_class: int, seed: int = 0):
+    """Return (Subset, targets_of_subset) with at most `max_per_class` images per class."""
+    rng = np.random.RandomState(seed)
     targets = np.array(dataset.targets)
-    class_counts = np.bincount(targets, minlength=len(dataset.classes))
-    class_counts = np.maximum(class_counts, 1)          # avoid division by zero
-    weights = 1.0 / class_counts
-    weights = weights / weights.sum() * len(dataset.classes)  # normalise so mean ≈ 1
-    return torch.tensor(weights, dtype=torch.float32)
+    indices = []
+    for c in range(len(dataset.classes)):
+        idx = np.where(targets == c)[0]
+        if len(idx) > max_per_class:
+            idx = rng.choice(idx, max_per_class, replace=False)
+        indices.extend(sorted(idx.tolist()))
+    return Subset(dataset, indices), targets[indices]
 
 
-def get_weighted_sampler(dataset: datasets.ImageFolder) -> WeightedRandomSampler:
-    """Build a WeightedRandomSampler so every training batch is class-balanced."""
-    targets = np.array(dataset.targets)
-    class_counts = np.bincount(targets, minlength=len(dataset.classes))
-    class_counts = np.maximum(class_counts, 1)
-    sample_weights = 1.0 / class_counts[targets]       # per-sample weight
-    sampler = WeightedRandomSampler(
+def get_weighted_sampler(targets: np.ndarray, num_classes: int) -> WeightedRandomSampler:
+    """WeightedRandomSampler so every training batch is class-balanced."""
+    targets = np.asarray(targets)
+    class_counts = np.maximum(np.bincount(targets, minlength=num_classes), 1)
+    sample_weights = 1.0 / class_counts[targets]
+    return WeightedRandomSampler(
         weights=torch.tensor(sample_weights, dtype=torch.float64),
-        num_samples=len(dataset),
+        num_samples=len(targets),
         replacement=True,
     )
-    return sampler
 
 
-def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR):
+def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR, max_per_class: int = 0):
+    """
+    Returns (loaders, class_names, train_dataset).
+    `max_per_class > 0` limits each split to that many images per class (smoke tests).
+    """
     train_dataset = SafeImageFolder(root=train_dir, transform=train_transform)
-    val_dataset   = SafeImageFolder(root=val_dir,   transform=val_transform)
-
     if len(train_dataset.classes) == 0:
         raise ValueError(f"No valid image classes found in {train_dir}!")
+    class_names = train_dataset.classes
 
-    # WeightedRandomSampler replaces shuffle=True and balances class frequencies
-    sampler = get_weighted_sampler(train_dataset)
+    # Val / test are forced onto the TRAIN class list => indices always agree.
+    val_dataset = SafeImageFolder(root=val_dir, transform=val_transform, classes=class_names)
+    if len(val_dataset) == 0:
+        raise ValueError(f"No validation images found in {val_dir} for classes {class_names}!")
+
+    missing_val = [c for i, c in enumerate(class_names) if i not in set(val_dataset.targets)]
+    if missing_val:
+        logging.warning(f"Classes with NO validation images (metrics for them are undefined): {missing_val}")
+
+    train_ds, train_targets = train_dataset, np.array(train_dataset.targets)
+    val_ds = val_dataset
+    if max_per_class > 0:
+        train_ds, train_targets = subset_per_class(train_dataset, max_per_class)
+        val_ds, _ = subset_per_class(val_dataset, max_per_class)
+
+    sampler = get_weighted_sampler(train_targets, len(class_names))
 
     loaders = {
-        "train": DataLoader(
-            train_dataset,
-            batch_size=BATCH_SIZE,
-            sampler=sampler,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-        ),
-        "val": DataLoader(
-            val_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-        ),
+        "train": DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
+                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY),
+        "val": DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                          num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY),
     }
 
     if os.path.isdir(test_dir):
-        test_dataset = SafeImageFolder(root=test_dir, transform=val_transform)
+        test_dataset = SafeImageFolder(root=test_dir, transform=val_transform, classes=class_names)
         if len(test_dataset) > 0:
-            loaders["test"] = DataLoader(
-                test_dataset,
-                batch_size=BATCH_SIZE,
-                shuffle=False,
-                num_workers=NUM_WORKERS,
-                pin_memory=PIN_MEMORY,
-            )
+            loaders["test"] = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                                         num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
 
-    class_names = train_dataset.classes
     logging.info(f"Classes found: {class_names}")
-    logging.info(
-        f"Train: {len(train_dataset)} | Val: {len(val_dataset)} samples"
-    )
+    logging.info(f"Train: {len(train_ds)} | Val: {len(val_ds)} samples")
     print(f"[dataset] Classes   : {class_names}")
-    print(f"[dataset] Train size: {len(train_dataset)}")
-    print(f"[dataset] Val size  : {len(val_dataset)}")
+    print(f"[dataset] Train size: {len(train_ds)}")
+    print(f"[dataset] Val size  : {len(val_ds)}")
 
     return loaders, class_names, train_dataset

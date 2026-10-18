@@ -8,10 +8,15 @@ VAL_DIR     = os.path.join(DATASET_DIR, "val")
 TEST_DIR    = os.path.join(DATASET_DIR, "test")
 MODEL_DIR   = os.path.join(BASE_DIR, "models")
 MODEL_PATH  = os.path.join(MODEL_DIR, "model.pth")
+RUNS_DIR    = os.path.join(MODEL_DIR, "runs")      # one sub-folder per training run
+BACKUP_DIR  = os.path.join(MODEL_DIR, "backups")   # timestamped copies of replaced checkpoints
 LOG_DIR     = os.path.join(BASE_DIR, "logs")
 
 # ── Model & Training hyperparameters ──
 IMAGE_SIZE    = 456          # EfficientNet-B5 native resolution
+# ImageNet normalisation. Exported to models/model_meta.json so Android reads the same values.
+NORM_MEAN     = [0.485, 0.456, 0.406]
+NORM_STD      = [0.229, 0.224, 0.225]
 BATCH_SIZE    = 8
 EPOCHS        = 20
 LEARNING_RATE = 0.0001
@@ -22,16 +27,27 @@ WARMUP_EPOCHS = 10           # Phase 1: freeze backbone, train classifier head
 
 # ── Embedding / Mahalanobis OOD detection ──
 EMBEDDING_DIM          = 128   # Penultimate Linear(512, 128) feature dim
-MAHALANOBIS_PERCENTILE = 99    # Auto-calibrate threshold at 99th percentile
+MAHALANOBIS_PERCENTILE = 99    # Threshold = this percentile of held-out (val) distances
 CLASS_STATS_PATH       = os.path.join(MODEL_DIR, "class_stats.json")
-DISEASES_JSON_PATH     = os.path.join(MODEL_DIR, "diseases.json")
+MODEL_META_PATH        = os.path.join(MODEL_DIR, "model_meta.json")
+# Tracked in git (models/ is ignored). Source of truth for disease info shown in the app.
+DISEASES_JSON_PATH     = os.path.join(BASE_DIR, "diseases.json")
 
-# ── Thresholds ──
+# A covariance for EMBEDDING_DIM features needs far more samples than dimensions,
+# otherwise it is badly conditioned and every unseen image looks "out of distribution".
+MIN_SAMPLES_PER_CLASS  = 30
+MIN_TOTAL_SAMPLES      = 8 * EMBEDDING_DIM
+DEFAULT_STATS_TRAIN_PER_CLASS = 600
+DEFAULT_STATS_VAL_PER_CLASS   = 150
+DEFAULT_STATS_TEST_PER_CLASS  = 50
+
+# ── Thresholds (exported to the app via model_meta.json) ──
 CONFIDENCE_THRESHOLD  = 0.60   # Flag low confidence if below 60%
+ENTROPY_FACTOR        = 0.75   # entropy threshold = factor * ln(num_classes)
 
 def get_entropy_threshold(num_classes: int) -> float:
-    """Scales dynamically with the number of classes (75% of max Shannon entropy)."""
-    return round(0.75 * math.log(max(num_classes, 2)), 4)
+    """Scales dynamically with the number of classes (ENTROPY_FACTOR of max Shannon entropy)."""
+    return round(ENTROPY_FACTOR * math.log(max(num_classes, 2)), 4)
 
 TRAIN_LOG_FILE    = os.path.join(LOG_DIR, "train.log")
 EVALUATE_LOG_FILE = os.path.join(LOG_DIR, "evaluate.log")

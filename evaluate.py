@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import argparse
 import numpy as np
 import torch
 import matplotlib
@@ -20,19 +21,8 @@ from config import (
     NUM_WORKERS, TEST_DIR, EVALUATE_LOG_FILE
 )
 from model import load_model
-from dataset_utils import val_transform, SafeImageFolder
-
-os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(
-    filename=EVALUATE_LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
-)
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logging.getLogger().handlers):
-    logging.getLogger().addHandler(console)
+from dataset_utils import val_transform, SafeImageFolder, subset_per_class
+from log_utils import setup_logging
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,15 +45,28 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list):
     logging.info(f"Confusion matrix saved -> {path}")
 
 
-def evaluate():
+def evaluate(model_path: str = MODEL_PATH, subset: int = 0):
     if not os.path.isdir(TEST_DIR):
         logging.error(f"Test directory is missing: {TEST_DIR}")
         return
-
-    test_dataset = SafeImageFolder(root=TEST_DIR, transform=val_transform)
-    if len(test_dataset) == 0:
-        logging.error(f"No test images found in {TEST_DIR}")
+    if not os.path.exists(model_path):
+        logging.error(f"Model not found: {model_path}")
         return
+
+    model = load_model(model_path, device)
+    class_names = model.class_names
+    if not class_names:
+        logging.error("Checkpoint has no class_names; cannot evaluate reliably.")
+        return
+
+    # Force the test set onto the CHECKPOINT's class order so labels always line up.
+    test_dataset = SafeImageFolder(root=TEST_DIR, transform=val_transform, classes=class_names)
+    if len(test_dataset) == 0:
+        logging.error(f"No test images found in {TEST_DIR} for classes {class_names}")
+        return
+
+    if subset > 0:
+        test_dataset, _ = subset_per_class(test_dataset, subset)
 
     test_loader = DataLoader(
         test_dataset,
@@ -71,11 +74,8 @@ def evaluate():
         shuffle=False,
         num_workers=NUM_WORKERS,
     )
-    class_names = test_dataset.classes
     logging.info(f"Test samples : {len(test_dataset)}")
     logging.info(f"Classes      : {class_names}")
-
-    model = load_model(MODEL_PATH, device)
 
     all_preds, all_labels = [], []
 
@@ -90,10 +90,18 @@ def evaluate():
     all_preds  = np.array(all_preds)
     all_labels = np.array(all_labels)
 
-    acc     = accuracy_score(all_labels, all_preds) * 100
-    macro_f1 = f1_score(all_labels, all_preds, average="macro")
-    report  = classification_report(all_labels, all_preds, target_names=class_names)
-    cm      = confusion_matrix(all_labels, all_preds)
+    label_ids = list(range(len(class_names)))
+    present   = sorted(set(all_labels.tolist()))
+    absent    = [class_names[i] for i in label_ids if i not in present]
+    if absent:
+        logging.warning(f"Classes with no test images (excluded from macro-F1): {absent}")
+
+    acc      = accuracy_score(all_labels, all_preds) * 100
+    macro_f1 = f1_score(all_labels, all_preds, labels=present, average="macro", zero_division=0)
+    report   = classification_report(
+        all_labels, all_preds, labels=label_ids, target_names=class_names, zero_division=0
+    )
+    cm       = confusion_matrix(all_labels, all_preds, labels=label_ids)
 
     logging.info(f"\nOverall Accuracy : {acc:.2f}%")
     logging.info(f"Macro-F1 Score   : {macro_f1:.4f}")
@@ -119,4 +127,9 @@ def evaluate():
 
 
 if __name__ == "__main__":
-    evaluate()
+    parser = argparse.ArgumentParser(description="Evaluate a checkpoint on the test set")
+    parser.add_argument("--model", default=MODEL_PATH, help="Checkpoint to evaluate")
+    parser.add_argument("--subset", type=int, default=0, help="Evaluate on at most N images per class")
+    args = parser.parse_args()
+    setup_logging(EVALUATE_LOG_FILE)
+    evaluate(args.model, subset=args.subset)

@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -35,6 +36,7 @@ import java.util.*
 @Composable
 fun HistoryScreen(database: AppDatabase) {
     val pc             = LocalPaddyCareColors.current
+    val context        = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val scans          by database.scanDao().getAllScans().collectAsState(initial = emptyList())
     var showDialog     by remember { mutableStateOf(false) }
@@ -57,7 +59,15 @@ fun HistoryScreen(database: AppDatabase) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    coroutineScope.launch { database.scanDao().deleteAll() }
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        database.scanDao().deleteAll()
+                        try {
+                            val scansDir = java.io.File(context.filesDir, "scans")
+                            if (scansDir.exists()) {
+                                scansDir.listFiles()?.forEach { it.delete() }
+                            }
+                        } catch (_: Exception) {}
+                    }
                     showDialog = false
                 }) { Text(stringResource(R.string.yes), color = SeverityHigh) }
             },

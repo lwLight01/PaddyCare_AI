@@ -61,6 +61,8 @@ def load_model(model_path: str, device: torch.device) -> nn.Module:
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
+    # Label order the head was trained with (the checkpoint is the single source of truth).
+    model.class_names = list(checkpoint["class_names"]) if "class_names" in checkpoint else None
 
     epoch = checkpoint.get("epoch", "?")
     val_score = checkpoint.get("val_macro_f1", checkpoint.get("val_acc", "?"))

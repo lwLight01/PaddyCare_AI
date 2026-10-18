@@ -18,39 +18,47 @@ pip install -r requirements.txt
 ```
 
 ### Dataset Structure
-Organize your dataset inside the `dataset` folder as follows:
+Organize your dataset inside the `dataset` folder:
 ```text
 dataset/
 ├── train/
 │   ├── Bacterial Blight/
-│   ├── Blast/
 │   └── Healthy/
-└── val/
+├── val/
+│   ├── Bacterial Blight/
+│   └── Healthy/
+└── test/
     ├── Bacterial Blight/
-    ├── Blast/
     └── Healthy/
 ```
-*(Test set is optional)*
+*(Any additional classes placed into `train/` will be discovered automatically).*
 
 ### Training
-Run the training script. It will train the EfficientNet-B5 architecture (with a two-phase warmup + fine-tuning strategy) and save the best model to `models/model.pth`.
+Run the training script (EfficientNet-B5 with two-phase warmup + differential fine-tuning):
 ```bash
 python train.py
 ```
+Options:
+- `python train.py --smoke` : Fast dry-run without overwriting the production model.
+- `python train.py --subset 100` : Limit to 100 images per class for rapid testing.
+- `python train.py --epochs 25 --warmup 8` : Custom epoch scheduling.
+- `python train.py --no-stats` : Skip automatic OOD covariance extraction.
 
 ### Evaluation
-Evaluate the trained model against the validation set:
+Evaluate the trained model against the held-out test split:
 ```bash
 python evaluate.py
 ```
+Options:
+- `python evaluate.py --model models/model.pth` : Specify checkpoint.
 
 ### OOD Calibration (Mahalanobis Distance)
-After training, compute the class embedding statistics for on-device out-of-distribution leaf detection:
+Compute class embedding statistics (Ledoit-Wolf shrinkage covariance) for on-device out-of-distribution leaf detection:
 ```bash
 python extract_embeddings.py
 ```
-*(On CPU, you can add `--max-samples 100` for fast calibration).*
-This generates `models/class_stats.json`.
+Options:
+- `python extract_embeddings.py --train-per-class 600 --val-per-class 150 --test-per-class 50`
 
 ---
 
@@ -65,7 +73,7 @@ pip install onnx onnxruntime onnx2tf tensorflow flatbuffers
 ```
 
 ### Export Script
-Run the export script. It will convert `model.pth` -> `model.onnx` -> `model.tflite` and auto-sync all required files directly to the Android app's assets folder:
+Run the export script. It will validate `diseases.json`, export `model_meta.json`, convert `model.pth` -> `model.onnx` -> `model.tflite` (dual outputs: logits + 128-dim embeddings), and auto-sync all required files directly to the Android app's assets folder:
 ```bash
 python export_tflite.py
 ```
@@ -74,8 +82,9 @@ python export_tflite.py
 The export script outputs and syncs:
 - `models/model.tflite` -> `PaddyCareAndroid/app/src/main/assets/model.tflite`
 - `models/labels.txt` -> `PaddyCareAndroid/app/src/main/assets/labels.txt`
-- `models/class_stats.json` -> `PaddyCareAndroid/app/src/main/assets/class_stats.json`
-- `models/diseases.json` -> `PaddyCareAndroid/app/src/main/assets/diseases.json`
+- `models/model_meta.json` -> `PaddyCareAndroid/app/src/main/assets/model_meta.json`
+- `diseases.json` -> `PaddyCareAndroid/app/src/main/assets/diseases.json`
+- `models/class_stats.json` -> `PaddyCareAndroid/app/src/main/assets/class_stats.json` (when generated)
 
 ---
 

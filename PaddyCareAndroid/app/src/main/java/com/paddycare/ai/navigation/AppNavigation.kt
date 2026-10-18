@@ -205,7 +205,7 @@ fun PaddyCareNavHost() {
                         currentResult   = result
                         currentImageUri = uri
                         coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            val savedPath = persistScanImage(context, uri)
+                            val savedPath = uri.toString()
                             val record = when (result) {
                                 is PredictionResult.Success -> {
                                     val top = result.predictions.first()
@@ -223,6 +223,19 @@ fun PaddyCareNavHost() {
                                 is PredictionResult.Error         -> ScanRecord(imagePath = savedPath, status = "error", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
                             }
                             database.scanDao().insert(record)
+
+                            // Prune history to keep at most 50 scans and clean up old images
+                            try {
+                                val overflowPaths = database.scanDao().getOverflowImagePaths(50)
+                                database.scanDao().deleteOverflowRecords(50)
+                                for (path in overflowPaths) {
+                                    val fileUri = Uri.parse(path)
+                                    if (fileUri.scheme == "file") {
+                                        val file = java.io.File(fileUri.path ?: "")
+                                        if (file.exists()) file.delete()
+                                    }
+                                }
+                            } catch (_: Exception) {}
                         }
                         navController.navigate(Screen.Result.route)
                     }
@@ -250,20 +263,5 @@ fun PaddyCareNavHost() {
             // Settings
             composable(Screen.Settings.route) { SettingsScreen() }
         }
-    }
-}
-
-private fun persistScanImage(context: android.content.Context, sourceUri: Uri): String {
-    return try {
-        val scansDir = java.io.File(context.filesDir, "scans").apply { mkdirs() }
-        val destFile = java.io.File(scansDir, "scan_${System.currentTimeMillis()}.jpg")
-        context.contentResolver.openInputStream(sourceUri)?.use { input ->
-            destFile.outputStream().use { output ->
-                input.copyTo(output)
-            }
-        }
-        Uri.fromFile(destFile).toString()
-    } catch (e: Exception) {
-        sourceUri.toString()
     }
 }
