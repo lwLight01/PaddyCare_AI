@@ -12,10 +12,6 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def setup_logging(log_file: str, console: bool = True) -> None:
-    """
-    Configure root logging for a script entry point (call from `main`, never at import time,
-    so importing a module can't hijack another script's log file).
-    """
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     root = logging.getLogger()
     for h in list(root.handlers):
@@ -34,7 +30,6 @@ def setup_logging(log_file: str, console: bool = True) -> None:
 
 
 def attach_file_log(log_file: str) -> logging.Handler:
-    """Additionally write to `log_file` (used when one script is called from another)."""
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))

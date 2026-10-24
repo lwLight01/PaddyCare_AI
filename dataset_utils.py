@@ -10,8 +10,6 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 import torchvision.transforms.functional as TF
 
-# NOTE: ImageFile.LOAD_TRUNCATED_IMAGES is deliberately NOT enabled. Corrupt files should fail
-# loudly instead of being trained on silently - run `python verify_dataset.py` to list them.
 from config import (
     TRAIN_DIR, VAL_DIR, TEST_DIR,
     IMAGE_SIZE, BATCH_SIZE, NUM_WORKERS, PIN_MEMORY,
@@ -20,16 +18,12 @@ from config import (
 
 
 def exif_loader(path: str) -> Image.Image:
-    """
-    Loads an image upright. torchvision's default loader ignores EXIF orientation, while Android's
-    ImageDecoder applies it - without this, phone photos can be trained sideways but scored upright.
-    """
+
     with Image.open(path) as im:
         return ImageOps.exif_transpose(im).convert("RGB")
 
 
 class PadToSquare:
-    """Pads the shorter side of an image with black pixels to make it square, preserving aspect ratio."""
     def __call__(self, img):
         w, h = img.size
         max_wh = max(w, h)
@@ -38,9 +32,6 @@ class PadToSquare:
         padding = (hp, vp, max_wh - w - hp, max_wh - h - vp)
         return TF.pad(img, padding, 0, 'constant')
 
-
-# Colour is a key diagnostic cue (yellow-brown streaks vs brown spots), so the augmentation avoids
-# TrivialAugmentWide's solarize / posterize / equalize ops and only uses mild, colour-preserving changes.
 train_transform = transforms.Compose([
     PadToSquare(),
     transforms.RandomResizedCrop((IMAGE_SIZE, IMAGE_SIZE), scale=(0.7, 1.0)),
@@ -61,22 +52,11 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=NORM_MEAN, std=NORM_STD),
 ])
 
-
-# Newer torchvision raises on classes with zero images unless allow_empty=True. Detect support
-# once from the signature instead of catching TypeError (which would hide unrelated errors).
 _IMAGEFOLDER_HAS_ALLOW_EMPTY = "allow_empty" in inspect.signature(datasets.ImageFolder.__init__).parameters
 
 
 class SafeImageFolder(datasets.ImageFolder):
-    """
-    ImageFolder that
-      1. ignores class sub-directories that contain no images (so empty placeholder
-         folders never crash training),
-      2. can be forced to use a fixed class list (``classes=``). Val/test sets must
-         use the TRAIN class list so label indices always agree, even when a newly
-         added class has no val/test images yet, and
-      3. loads images with EXIF orientation applied (see ``exif_loader``).
-    """
+
     def __init__(self, root, transform=None, classes=None, loader=exif_loader, **kwargs):
         self._forced_classes = list(classes) if classes is not None else None
         if _IMAGEFOLDER_HAS_ALLOW_EMPTY:
@@ -93,7 +73,6 @@ class SafeImageFolder(datasets.ImageFolder):
 
 
 def subset_per_class(dataset: datasets.ImageFolder, max_per_class: int, seed: int = 0):
-    """Return (Subset, targets_of_subset) with at most `max_per_class` images per class."""
     rng = np.random.RandomState(seed)
     targets = np.array(dataset.targets)
     indices = []
@@ -106,10 +85,7 @@ def subset_per_class(dataset: datasets.ImageFolder, max_per_class: int, seed: in
 
 
 def split_fingerprint(dataset) -> str:
-    """
-    Short hash of exactly which files (and labels) a split contains. Stored in checkpoints so
-    validation scores are only compared when they were measured on the same images.
-    """
+
     if isinstance(dataset, Subset):
         base, indices = dataset.dataset, list(dataset.indices)
     else:
@@ -124,14 +100,12 @@ def split_fingerprint(dataset) -> str:
 
 
 def seed_worker(worker_id: int) -> None:
-    """Gives every DataLoader worker a deterministic seed derived from the torch base seed."""
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
 def get_weighted_sampler(targets: np.ndarray, num_classes: int, generator: torch.Generator = None) -> WeightedRandomSampler:
-    """WeightedRandomSampler so every training batch is class-balanced."""
     targets = np.asarray(targets)
     class_counts = np.maximum(np.bincount(targets, minlength=num_classes), 1)
     sample_weights = 1.0 / class_counts[targets]
@@ -145,16 +119,11 @@ def get_weighted_sampler(targets: np.ndarray, num_classes: int, generator: torch
 
 def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR, max_per_class: int = 0,
                     seed: int = SEED):
-    """
-    Returns (loaders, class_names, train_dataset).
-    `max_per_class > 0` limits each split to that many images per class (smoke tests).
-    """
     train_dataset = SafeImageFolder(root=train_dir, transform=train_transform)
     if len(train_dataset.classes) == 0:
         raise ValueError(f"No valid image classes found in {train_dir}!")
     class_names = train_dataset.classes
 
-    # Val / test are forced onto the TRAIN class list => indices always agree.
     val_dataset = SafeImageFolder(root=val_dir, transform=val_transform, classes=class_names)
     if len(val_dataset) == 0:
         raise ValueError(f"No validation images found in {val_dir} for classes {class_names}!")

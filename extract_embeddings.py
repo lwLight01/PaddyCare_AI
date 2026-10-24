@@ -1,28 +1,3 @@
-"""
-extract_embeddings.py
-=====================
-Computes per-class embedding statistics (class means + shared precision matrix) from the
-trained model for Mahalanobis-based OOD detection.
-
-Run this AFTER training and BEFORE export:
-    python extract_embeddings.py
-
-How it stays statistically sound
---------------------------------
-* Class means and the shared covariance come from TRAIN images (a random, not "first N", subset).
-* The covariance uses Ledoit-Wolf shrinkage - a raw 128x128 covariance estimated from a
-  few dozen samples is near-singular and makes every unseen image look out-of-distribution.
-* The OOD threshold is calibrated on HELD-OUT validation images (distance to the predicted
-  class mean, exactly what the app computes), not on the training images the stats were fitted to.
-* The finished stats are verified on a held-out TEST subset; if too many known-good images
-  are flagged the stats are NOT written.
-* Stats are refused outright when there are too few samples for a 128-dim covariance.
-
-Outputs (only when every guard passes):
-    models/class_stats.json
-    PaddyCareAndroid/app/src/main/assets/class_stats.json (if the Android project exists)
-"""
-
 import os
 import json
 import shutil
@@ -45,7 +20,6 @@ from log_utils import setup_logging
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Max tolerated fraction of held-out TEST images flagged OOD before the stats are rejected.
 MAX_TEST_FLAG_RATE = 0.10
 MIN_VAL_SAMPLES = 50
 
@@ -55,7 +29,6 @@ def android_assets_dir() -> str:
 
 
 def remove_stale_stats() -> None:
-    """Delete stats that no longer match the model (the app simply skips the OOD check without them)."""
     for path in (CLASS_STATS_PATH, os.path.join(android_assets_dir(), "class_stats.json")):
         if os.path.exists(path):
             try:
@@ -66,7 +39,6 @@ def remove_stale_stats() -> None:
 
 
 def _load_split(root: str, class_names: list, per_class: int, seed: int):
-    """Returns a dataset (possibly sub-sampled per class) or None when the split has no images."""
     if not os.path.isdir(root):
         return None
     ds = SafeImageFolder(root=root, transform=val_transform, classes=class_names)
@@ -78,7 +50,6 @@ def _load_split(root: str, class_names: list, per_class: int, seed: int):
 
 
 def _embed(model, dataset, tag: str):
-    """Returns (embeddings[N,128], labels[N], predictions[N])."""
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     embs, labels, preds = [], [], []
     n = len(dataset)
@@ -93,7 +64,6 @@ def _embed(model, dataset, tag: str):
 
 
 def _distances(emb, preds, class_means, precision, class_names):
-    """Mahalanobis distance to the PREDICTED class mean; NaN when that class has no mean."""
     out = np.full(len(emb), np.nan)
     for i, (e, p) in enumerate(zip(emb, preds)):
         mean = class_means.get(class_names[p])
@@ -110,7 +80,7 @@ def extract_and_save(
     test_per_class: int = DEFAULT_STATS_TEST_PER_CLASS,
     model_path: str = MODEL_PATH,
 ):
-    """Returns the stats dict, or None when the stats could not be produced safely."""
+
     logging.info("=" * 60)
     logging.info("Extracting embeddings for Mahalanobis OOD detection ...")
     logging.info(f"Device: {device}")
@@ -141,7 +111,6 @@ def extract_and_save(
         remove_stale_stats()
         return None
 
-    # ── Train embeddings → class means + shared covariance ──
     emb, labels, _ = _embed(model, train_ds, "train")
     logging.info(f"Train embeddings: {emb.shape}")
 
@@ -171,7 +140,6 @@ def extract_and_save(
     logging.info(f"Ledoit-Wolf shrinkage = {lw.shrinkage_:.4f} | "
                  f"cov condition number = {np.linalg.cond(lw.covariance_):.1f}")
 
-    # ── Calibrate threshold on held-out VAL images ──
     v_emb, _, v_pred = _embed(model, val_ds, "val")
     v_dist = _distances(v_emb, v_pred, class_means, precision, class_names)
     v_dist = v_dist[~np.isnan(v_dist)]
@@ -183,7 +151,6 @@ def extract_and_save(
     logging.info(f"Val distances: mean {v_dist.mean():.2f}, std {v_dist.std():.2f}, max {v_dist.max():.2f}")
     logging.info(f"Threshold ({MAHALANOBIS_PERCENTILE}th percentile of val): {threshold:.4f}")
 
-    # ── Verify on held-out TEST images (never used for fitting or calibration) ──
     test_flag_rate = None
     if test_ds is not None and len(test_ds) > 0:
         t_emb, _, t_pred = _embed(model, test_ds, "test")

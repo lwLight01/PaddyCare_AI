@@ -26,7 +26,6 @@ from log_utils import setup_logging
 
 
 def set_seed(seed: int = SEED) -> None:
-    """Seeds every RNG. Called from main/train, never at import time."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -69,11 +68,6 @@ def save_training_curves(history: dict, save_dir: str):
 
 
 def make_param_groups(parts: list, weight_decay: float = WEIGHT_DECAY) -> list:
-    """
-    Builds AdamW parameter groups. `parts` is a list of (module, lr).
-    Weight decay is applied to weight matrices / conv kernels only - never to biases or
-    BatchNorm / LayerNorm parameters (1-D tensors), where it only hurts.
-    """
     groups = []
     for module, lr in parts:
         decay, no_decay = [], []
@@ -113,10 +107,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, phase: int, dev
                     accum_steps: int = ACCUM_STEPS):
     model.train()
     if phase == 1:
-        # Phase 1 warmup: the whole backbone (BN + stochastic depth) stays in eval mode
         model.features.eval()
-    # Phase 2: BatchNorm running stats stay frozen - a physical batch of 8 is far too small
-    # to estimate them, and gradient accumulation does not help BN.
     set_bn_eval(model)
 
     running_loss, correct, total = 0.0, 0, 0
@@ -178,18 +169,7 @@ def validate(model, loader, criterion, device, use_amp: bool):
 
 
 def should_promote_checkpoint(new_meta: dict, current_path: str = MODEL_PATH, force: bool = False) -> tuple[bool, str]:
-    """
-    Decides whether to promote a newly trained run model to MODEL_PATH.
-    Scores are only compared like-with-like. Safety rules:
-      1. If MODEL_PATH does not exist: promote.
-      2. If --force was given: promote.
-      3. If the new run used --subset: reject (a subset score is not a production score).
-      4. If class lists differ: reject (F1 over different classes is not comparable).
-      5. If the old checkpoint lacks val_macro_f1: promote.
-      6. If the two scores were measured on different validation sets: reject.
-      7. If new val_macro_f1 >= old val_macro_f1: promote, otherwise reject.
-    Rejections can be overridden with --force after checking the run yourself.
-    """
+
     if not os.path.exists(current_path):
         return True, "No existing model.pth found; promoting new model."
     if force:
@@ -365,7 +345,6 @@ def train(
             best_val_acc  = v_acc
             best_epoch    = epoch
             epochs_no_improve = 0
-            # model.pth holds weights + metadata only (no optimizer state) to keep it small.
             torch.save({
                 **checkpoint_meta,
                 "epoch":            epoch,
@@ -377,7 +356,6 @@ def train(
         elif phase == 2:
             epochs_no_improve += 1
 
-        # Resume checkpoint (optimizer / scheduler / scaler / history) - lives only in the run dir.
         torch.save({
             **checkpoint_meta,
             "epoch":                epoch,
@@ -404,7 +382,6 @@ def train(
     logging.info(f"Training finished in {elapsed/60:.1f} min")
     logging.info(f"Best Val Macro-F1: {best_macro_f1:.4f} (Acc: {best_val_acc:.2f}%, Epoch {best_epoch})")
 
-    # Per-run outputs only. logs/ is updated only when a model is promoted.
     history_path = os.path.join(run_dir, "history.json")
     with open(history_path, "w") as f:
         json.dump(history, f, indent=2)
@@ -414,7 +391,6 @@ def train(
         logging.info(f"Smoke test complete. Run model kept in {run_best_model_path} (not promoted).")
         return run_best_model_path
 
-    # ── Checkpoint Promotion Safety Check ──
     best_meta = {
         "val_macro_f1":    best_macro_f1,
         "val_acc":         best_val_acc,
@@ -438,9 +414,6 @@ def train(
     else:
         logging.info(f"Run best model remains in {run_best_model_path}; {MODEL_PATH} was preserved.")
 
-    # ── OOD Statistics Extraction ──
-    # Production stats (models/class_stats.json) are only ever written for the production model;
-    # a non-promoted run gets its stats inside its own run folder.
     import extract_embeddings
     target_for_stats = MODEL_PATH if promote else run_best_model_path
     stats_out = CLASS_STATS_PATH if promote else os.path.join(run_dir, "class_stats.json")
