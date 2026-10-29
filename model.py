@@ -110,11 +110,14 @@ def load_model(model_path: str, device: torch.device) -> nn.Module:
     model.to(device)
     model.eval()
     model.class_names = class_names
+    model.checkpoint_epoch = checkpoint.get("epoch")
+    model.checkpoint_fingerprint = checkpoint_fingerprint(model_path)
 
     epoch = checkpoint.get("epoch", "?")
     val_score = checkpoint.get("val_macro_f1", checkpoint.get("val_acc", "?"))
     print(f"[model] Loaded from {model_path} (epoch {epoch}, val score: {val_score}, classes: {class_names})")
     return model
+
 
 def forward_with_embedding(model: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Runs EfficientNet + PaddyHead and returns (logits, 128-dim embedding). No hooks needed."""

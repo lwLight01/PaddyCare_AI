@@ -12,6 +12,8 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -25,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.*
 import com.paddycare.ai.PaddyCareApp
 import com.paddycare.ai.R
+import com.paddycare.ai.data.Prediction
 import com.paddycare.ai.data.PredictionResult
 import com.paddycare.ai.data.ScanRecord
 import com.paddycare.ai.ui.screens.*
@@ -49,6 +52,34 @@ data class NavItem(
     val isFab: Boolean = false
 )
 
+/** Lets the latest scan result survive rotation and process death. */
+private val PredictionResultSaver: Saver<PredictionResult?, Any> = Saver(
+    save = { r ->
+        when (r) {
+            null -> arrayListOf<Any>("none")
+            is PredictionResult.Success -> arrayListOf<Any>("ok").apply {
+                r.predictions.forEach { add(it.disease); add(it.confidence); add(it.treatment) }
+            }
+            is PredictionResult.NotPaddy      -> arrayListOf<Any>("not_paddy", r.message)
+            is PredictionResult.LowConfidence -> arrayListOf<Any>("low_confidence", r.message)
+            is PredictionResult.Error         -> arrayListOf<Any>("error", r.message)
+        }
+    },
+    restore = { saved ->
+        @Suppress("UNCHECKED_CAST")
+        val l = saved as List<Any>
+        when (l[0] as String) {
+            "ok" -> PredictionResult.Success(
+                l.drop(1).chunked(3).map { Prediction(it[0] as String, it[1] as Float, it[2] as String) }
+            )
+            "not_paddy"      -> PredictionResult.NotPaddy(l[1] as String)
+            "low_confidence" -> PredictionResult.LowConfidence(l[1] as String)
+            "error"          -> PredictionResult.Error(l[1] as String)
+            else             -> null
+        }
+    }
+)
+
 @Composable
 fun PaddyCareNavHost() {
     val navController  = rememberNavController()
@@ -57,8 +88,8 @@ fun PaddyCareNavHost() {
     val coroutineScope = rememberCoroutineScope()
     val pc             = LocalPaddyCareColors.current
 
-    var currentResult  by remember { mutableStateOf<PredictionResult?>(null) }
-    var currentImageUri by remember { mutableStateOf<Uri?>(null) }
+    var currentResult  by rememberSaveable(stateSaver = PredictionResultSaver) { mutableStateOf<PredictionResult?>(null) }
+    var currentImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var launchCameraEvent by remember { mutableStateOf(false) }
 
     val navItems = listOf(
@@ -111,11 +142,11 @@ fun PaddyCareNavHost() {
                                         modifier = Modifier
                                             .size(52.dp)
                                             .offset(y = (-6).dp)
+                                            .shadow(8.dp, CircleShape)
                                             .background(
                                                 Brush.linearGradient(listOf(GreenLight, pc.greenPrimary)),
                                                 CircleShape
-                                            )
-                                            .shadow(8.dp, CircleShape),
+                                            ),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         IconButton(
@@ -244,13 +275,18 @@ fun PaddyCareNavHost() {
 
             // Result
             composable(Screen.Result.route) {
-                if (currentResult != null && currentImageUri != null) {
+                val result = currentResult
+                val imageUri = currentImageUri
+                if (result != null && imageUri != null) {
                     ResultScreen(
-                        result      = currentResult!!,
-                        imageUri    = currentImageUri!!,
+                        result      = result,
+                        imageUri    = imageUri,
                         onBack      = { navController.popBackStack() },
                         onScanAgain = { navController.popBackStack(Screen.Home.route, false) }
                     )
+                } else {
+                    // Nothing to show (state was lost): leave instead of rendering a blank screen.
+                    LaunchedEffect(Unit) { navController.popBackStack() }
                 }
             }
 

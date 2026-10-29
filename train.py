@@ -116,7 +116,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, phase: int, dev
     for batch_idx, (images, labels) in enumerate(loader):
         images, labels = images.to(device), labels.to(device)
 
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast(device.type, enabled=use_amp):
             outputs = model(images)
             loss = criterion(outputs, labels) / accum_steps
 
@@ -151,7 +151,7 @@ def validate(model, loader, criterion, device, use_amp: bool):
     with torch.inference_mode():
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast(device.type, enabled=use_amp):
                 outputs = model(images)
                 loss    = criterion(outputs, labels)
 
@@ -162,8 +162,8 @@ def validate(model, loader, criterion, device, use_amp: bool):
 
     total = len(all_labels)
     epoch_loss = running_loss / total
-    epoch_acc  = 100.0 * accuracy_score(all_labels, all_preds)
-    macro_f1   = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    epoch_acc  = 100.0 * float(accuracy_score(all_labels, all_preds))
+    macro_f1   = float(f1_score(all_labels, all_preds, average="macro", zero_division=0))
 
     return epoch_loss, epoch_acc, macro_f1
 

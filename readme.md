@@ -1,6 +1,6 @@
 # PaddyCare AI 🌾
 
-PaddyCare AI is a comprehensive solution for detecting paddy leaf diseases (Bacterial Blight and Healthy) using Deep Learning (PyTorch & TensorFlow Lite) and a Native Android App (Kotlin & Jetpack Compose).
+PaddyCare AI is a comprehensive solution for detecting paddy leaf diseases (e.g. Bacterial Blight, Blast, Brown Spot, Healthy) using Deep Learning (PyTorch & TensorFlow Lite) and a Native Android App (Kotlin & Jetpack Compose). The class list is read from the dataset folders and stored in each checkpoint.
 
 This repository contains:
 1. The **PyTorch** training pipeline to train a custom **EfficientNet-B5** model with two-phase transfer learning.
@@ -43,6 +43,9 @@ Options:
 - `python train.py --subset 100` : Limit to 100 images per class for rapid testing.
 - `python train.py --epochs 25 --warmup 8` : Custom epoch scheduling.
 - `python train.py --no-stats` : Skip automatic OOD covariance extraction.
+- `python train.py --resume models/runs/run_<timestamp>/last.pth` : Resume an interrupted run.
+- `python train.py --patience 5` : Phase-2 early-stopping patience (`0` disables it).
+- `python train.py --force` : Promote the run even if its score is not comparable with the current `model.pth`.
 
 ### Evaluation
 Evaluate the trained model against the held-out test split:
@@ -51,6 +54,7 @@ python evaluate.py
 ```
 Options:
 - `python evaluate.py --model models/model.pth` : Specify checkpoint.
+- `python evaluate.py --subset 50` : Evaluate on at most 50 images per class.
 
 ### OOD Calibration (Mahalanobis Distance)
 Compute class embedding statistics (Ledoit-Wolf shrinkage covariance) for on-device out-of-distribution leaf detection:
@@ -58,7 +62,7 @@ Compute class embedding statistics (Ledoit-Wolf shrinkage covariance) for on-dev
 python extract_embeddings.py
 ```
 Options:
-- `python extract_embeddings.py --train-per-class 600 --val-per-class 150 --test-per-class 50`
+- `python extract_embeddings.py --train-per-class 600 --val-per-class 150 --test-per-class 50 --model models/model.pth`
 
 ---
 

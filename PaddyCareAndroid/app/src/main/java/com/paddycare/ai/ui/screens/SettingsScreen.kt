@@ -17,7 +17,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.res.stringResource
+import com.paddycare.ai.R
 import com.paddycare.ai.ui.theme.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen() {
@@ -26,8 +30,43 @@ fun SettingsScreen() {
     val settingsManager = (context.applicationContext as com.paddycare.ai.PaddyCareApp).settingsManager
     
     val darkMode by settingsManager.darkMode.collectAsState()
-    val notifOn by settingsManager.notifOn.collectAsState()
-    val emailOn by settingsManager.emailOn.collectAsState()
+    val language by settingsManager.language.collectAsState()
+    val database = (context.applicationContext as com.paddycare.ai.PaddyCareApp).database
+    val coroutineScope = rememberCoroutineScope()
+    var showClearDialog by remember { mutableStateOf(false) }
+    val versionName = remember {
+        try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text(stringResource(R.string.clear_confirm_title), fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = { Text(stringResource(R.string.clear_confirm_msg), color = pc.textSecondary, fontSize = 14.sp) },
+            confirmButton = {
+                TextButton(onClick = {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        database.scanDao().deleteAll()
+                        try {
+                            java.io.File(context.filesDir, "scans").listFiles()?.forEach { it.delete() }
+                        } catch (_: Exception) {}
+                    }
+                    showClearDialog = false
+                }) { Text(stringResource(R.string.yes), color = SeverityHigh) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text(stringResource(R.string.no), color = pc.textSecondary)
+                }
+            },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = pc.bgCard
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -68,17 +107,11 @@ fun SettingsScreen() {
                     pc = pc
                 ) { settingsManager.setDarkMode(it) }
                 HorizontalDivider(thickness = 1.dp, color = pc.divider)
-                SettingsNavRow(Icons.Outlined.Language, Color(0xFFDBEAFE), "ভাষা", "বাংলা (বর্তমান)", pc)
-            }
-
-            Spacer(Modifier.height(4.dp))
-
-            // ── Notifications ─────────────────────────────────────────
-            SettingsSectionLabel("বিজ্ঞপ্তি", pc)
-            SettingsCard(pc) {
-                SettingsToggleRow("🔔", Color(0xFFFFEDD5), "পুশ নোটিফিকেশন", "নতুন রোগের সতর্কতা", notifOn, pc) { settingsManager.setNotifOn(it) }
-                HorizontalDivider(thickness = 1.dp, color = pc.divider)
-                SettingsToggleRow("📧", pc.greenPale, "রিপোর্ট ইমেইল", "সাপ্তাহিক রিপোর্ট পান", emailOn, pc) { settingsManager.setEmailOn(it) }
+                SettingsNavRow(
+                    Icons.Outlined.Language, Color(0xFFDBEAFE), "চিকিৎসার ভাষা",
+                    if (language == "en") "English (ট্যাপ করে বদলান)" else "বাংলা (ট্যাপ করে বদলান)",
+                    pc
+                ) { settingsManager.setLanguage(if (language == "en") "bn" else "en") }
             }
 
             Spacer(Modifier.height(4.dp))
@@ -86,9 +119,9 @@ fun SettingsScreen() {
             // ── Data ──────────────────────────────────────────────────
             SettingsSectionLabel("ডেটা", pc)
             SettingsCard(pc) {
-                SettingsNavRow(Icons.Outlined.Delete, Color(0xFFFEE2E2), "ইতিহাস মুছুন", "সমস্ত স্ক্যান ডেটা মুছে ফেলুন", pc)
-                HorizontalDivider(thickness = 1.dp, color = pc.divider)
-                SettingsNavRow(Icons.Outlined.Cloud, Color(0xFFDBEAFE), "ব্যাকআপ", "ক্লাউডে সেভ করুন", pc)
+                SettingsNavRow(
+                    Icons.Outlined.Delete, Color(0xFFFEE2E2), "ইতিহাস মুছুন", "সমস্ত স্ক্যান ডেটা মুছে ফেলুন", pc
+                ) { showClearDialog = true }
             }
 
             Spacer(Modifier.height(4.dp))
@@ -107,7 +140,7 @@ fun SettingsScreen() {
                     Text("🌾", fontSize = 40.sp)
                     Spacer(Modifier.height(8.dp))
                     Text("PaddyCare AI", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = pc.textPrimary)
-                    Text("সংস্করণ ২.০.১", fontSize = 12.sp, color = pc.textMuted)
+                    Text("সংস্করণ $versionName", fontSize = 12.sp, color = pc.textMuted)
                     Spacer(Modifier.height(10.dp))
                     Text(
                         text = "AI প্রযুক্তি ব্যবহার করে ধান পাতার রোগ সনাক্তকরণ ও চিকিৎসা পরামর্শ প্রদান করে। বাংলাদেশের কৃষকদের জন্য তৈরি।",
@@ -187,12 +220,13 @@ private fun SettingsToggleRow(
 private fun SettingsNavRow(
     icon: ImageVector, iconBg: Color,
     title: String, subtitle: String,
-    pc: PaddyCareColors
+    pc: PaddyCareColors,
+    onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { }
+            .clickable { onClick() }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)

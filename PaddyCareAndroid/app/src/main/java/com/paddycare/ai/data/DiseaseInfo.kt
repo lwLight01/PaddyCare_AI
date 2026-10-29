@@ -18,6 +18,16 @@ object DiseaseInfo {
     private val dynamicTreatmentsBn = mutableMapOf<String, String>()
     private val dynamicTreatmentsEn = mutableMapOf<String, String>()
     private val dynamicRejectClasses = mutableSetOf<String>()
+    private val dynamicSeverity = mutableMapOf<String, String>()
+
+    /** Built-in fallback severity ("high" | "medium" | "low" | "none") per disease. */
+    private val DEFAULT_SEVERITY = mapOf(
+        "Bacterial Blight" to "high",
+        "Blast" to "high",
+        "Brown Spot" to "medium",
+        "Healthy" to "none",
+        "Not Leaf" to "none",
+    )
 
     /** Built-in fallback Bengali display names */
     val DISEASE_BN = mapOf(
@@ -120,6 +130,7 @@ object DiseaseInfo {
                     if (treatmentEn.isNotBlank()) dynamicTreatmentsEn[key] = treatmentEn
                     if (treatmentBn.isNotBlank()) dynamicTreatmentsBn[key] = treatmentBn
                     if (isReject) dynamicRejectClasses.add(key)
+                    obj.optString("severity", "").takeIf { it.isNotBlank() }?.let { dynamicSeverity[key] = it }
                 }
                 initialized = true
             } catch (e: Exception) {
@@ -135,6 +146,10 @@ object DiseaseInfo {
 
     fun getBengaliName(englishName: String): String =
         dynamicDiseaseBn[englishName] ?: DISEASE_BN[englishName] ?: englishName
+
+    /** Static severity of a disease: "high", "medium", "low", "none" or "unknown". Not related to model confidence. */
+    fun getSeverity(disease: String): String =
+        dynamicSeverity[disease] ?: DEFAULT_SEVERITY[disease] ?: "unknown"
 
     fun getTreatment(disease: String, lang: String = "bn"): String {
         return when (lang) {

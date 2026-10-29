@@ -22,16 +22,22 @@ data class ClassifyResult(
 
 /**
  * PaddyClassifier — runs TFLite EfficientNet-B5 inference on-device.
- * Now supports dual-outputs (logits + 128-dim embedding) for Mahalanobis OOD detection.
+ * Supports dual-outputs (logits + 128-dim embedding) for Mahalanobis OOD detection.
+ *
+ * Thread-safety: [classify] is synchronized because the TFLite [Interpreter] and the
+ * reusable input/output buffers must never be used by two callers at once.
  *
  * Usage:
  *   val classifier = PaddyClassifier(context)
  *   val result = classifier.classify(bitmap)
  *   classifier.close()
+ *
+ * @throws IllegalStateException if model.tflite, labels.txt and model_meta.json do not belong together.
  */
 class PaddyClassifier(context: Context) {
 
     companion object {
+        private const val TAG = "PaddyClassifier"
         private const val MODEL_FILE = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
         private const val STATS_FILE = "class_stats.json"
@@ -62,11 +68,25 @@ class PaddyClassifier(context: Context) {
     var entropyThreshold: Float = 0f
         private set
 
-    // Mahalanobis statistics
-    private var classMeans = mapOf<String, FloatArray>()
-    private var precisionMatrix = Array(EMBEDDING_DIM) { FloatArray(EMBEDDING_DIM) }
-    private var mahalanobisThreshold = Float.MAX_VALUE
+    // Export-time identity of the model, read from model_meta.json (null for older exports).
+    private var metaFingerprint: String? = null
+    private var metaLogitsIndex: Int? = null
+    private var metaEmbeddingIndex: Int? = null
+
+    // Mahalanobis statistics (Double: the precision matrix can be badly conditioned)
+    private var classMeans = mapOf<String, DoubleArray>()
+    private var precisionMatrix = Array(EMBEDDING_DIM) { DoubleArray(EMBEDDING_DIM) }
+    private var mahalanobisThreshold = Double.MAX_VALUE
     private var statsLoaded = false
+
+    // Resolved output layout + buffers reused across calls (guarded by `this` lock in classify()).
+    private val logitsIndex: Int
+    private val embedIndex: Int
+    private val inputBuffer: ByteBuffer
+    private val pixelBuffer: IntArray
+    private val outputs: MutableMap<Int, Any>
+    private val logitsOut: Array<FloatArray>
+    private val embedOut: Array<FloatArray>
 
     init {
         val model = loadModelFile(context)
@@ -76,87 +96,82 @@ class PaddyClassifier(context: Context) {
         interpreter = Interpreter(model, options)
         labels = loadLabels(context)
         loadModelMeta(context)
-        loadClassStats(context)
 
-        // Verify that label count matches the model's logits output tensor
-        val outputCount = interpreter.outputTensorCount
-        for (i in 0 until outputCount) {
-            val shape = interpreter.getOutputTensor(i).shape()
-            if (shape.size == 2 && shape[1] != EMBEDDING_DIM) {
-                if (shape[1] != labels.size) {
-                    Log.w(
-                        "PaddyClassifier",
-                        "⚠️ Model output classes (${shape[1]}) != labels.txt size (${labels.size}). " +
-                        "Please re-export model.tflite and labels.txt together."
-                    )
-                }
+        // Resolve which output tensor holds the logits and which the embedding.
+        val shapes = (0 until interpreter.outputTensorCount).map { interpreter.getOutputTensor(it).shape() }
+        val metaLi = metaLogitsIndex
+        val metaEi = metaEmbeddingIndex
+        if (metaLi != null && metaEi != null && metaLi != metaEi &&
+            metaLi in shapes.indices && metaEi in shapes.indices
+        ) {
+            logitsIndex = metaLi
+            embedIndex = metaEi
+        } else {
+            // Older exports: fall back to telling them apart by width.
+            val li = shapes.indexOfFirst { it.size == 2 && it[1] != EMBEDDING_DIM }
+            val ei = shapes.indexOfFirst { it.size == 2 && it[1] == EMBEDDING_DIM }
+            if (li < 0 || ei < 0) {
+                interpreter.close()
+                throw IllegalStateException("Unexpected TFLite output shapes: ${shapes.map { it.toList() }}")
             }
+            logitsIndex = li
+            embedIndex = ei
         }
+
+        val logitsSize = shapes[logitsIndex].last()
+        if (logitsSize != labels.size) {
+            interpreter.close()
+            throw IllegalStateException(
+                "Model has $logitsSize classes but labels.txt has ${labels.size}. " +
+                    "Re-export model.tflite and labels.txt together with export_tflite.py."
+            )
+        }
+        if (shapes[embedIndex].last() != EMBEDDING_DIM) {
+            interpreter.close()
+            throw IllegalStateException("Embedding output is ${shapes[embedIndex].last()}-dim, expected $EMBEDDING_DIM.")
+        }
+
+        logitsOut = Array(1) { FloatArray(logitsSize) }
+        embedOut = Array(1) { FloatArray(EMBEDDING_DIM) }
+        outputs = mutableMapOf<Int, Any>(logitsIndex to logitsOut, embedIndex to embedOut)
+
+        inputBuffer = ByteBuffer.allocateDirect(imageSize * imageSize * PIXEL_SIZE * BYTES_PER_FLOAT)
+            .order(ByteOrder.nativeOrder())
+        pixelBuffer = IntArray(imageSize * imageSize)
+
+        loadClassStats(context)
     }
 
     /**
      * Classify a bitmap image.
      * @return ClassifyResult containing predictions (sorted) and the 128-dim embedding.
      */
+    @Synchronized
     fun classify(bitmap: Bitmap): ClassifyResult {
         // Match Python pipeline: PadToSquare() → Resize(imageSize) → Normalize
         val squared = padToSquare(bitmap)
         val resized = Bitmap.createScaledBitmap(squared, imageSize, imageSize, true)
-        val inputBuffer = preprocessImage(resized)
+        fillInputBuffer(resized)
 
-        // The TFLite model has two outputs: logits and embedding.
-        val outputCount = interpreter.outputTensorCount
-        val outputs = mutableMapOf<Int, Any>()
+        interpreter.runForMultipleInputsOutputs(arrayOf<Any>(inputBuffer), outputs)
 
-        var logitsIndex = 0
-        var embedIndex = 1
-        var modelLogitsSize = labels.size
+        val probabilities = softmax(logitsOut[0])
+        val predictions = labels.indices
+            .map { i -> Pair(labels[i], probabilities[i]) }
+            .sortedByDescending { it.second }
 
-        for (i in 0 until outputCount) {
-            val shape = interpreter.getOutputTensor(i).shape()
-            if (shape.size == 2 && shape[1] != EMBEDDING_DIM) {
-                logitsIndex = i
-                modelLogitsSize = shape[1]
-                outputs[i] = Array(1) { FloatArray(shape[1]) }
-            } else if (shape.size == 2 && shape[1] == EMBEDDING_DIM) {
-                embedIndex = i
-                outputs[i] = Array(1) { FloatArray(EMBEDDING_DIM) }
-            }
-        }
-
-        val inputs = arrayOf(inputBuffer)
-        interpreter.runForMultipleInputsOutputs(inputs, outputs)
-
-        @Suppress("UNCHECKED_CAST")
-        val logitsArray = (outputs[logitsIndex] as? Array<FloatArray>)
-            ?: throw IllegalStateException("Failed to extract logits tensor from model output")
-        @Suppress("UNCHECKED_CAST")
-        val embedArray = (outputs[embedIndex] as? Array<FloatArray>)
-            ?: Array(1) { FloatArray(EMBEDDING_DIM) }
-
-        val logits = logitsArray[0]
-        val embedding = embedArray[0]
-
-        val probabilities = softmax(logits)
-
-        // Pair predictions up to the minimum of available labels and logits
-        val pairCount = minOf(labels.size, probabilities.size)
-        val predictions = (0 until pairCount).map { i ->
-            Pair(labels[i], probabilities[i])
-        }.sortedByDescending { it.second }
-
-        return ClassifyResult(predictions, embedding)
+        // Copy: embedOut is reused by the next call.
+        return ClassifyResult(predictions, embedOut[0].copyOf())
     }
 
     /**
      * Checks if the embedding is Out-Of-Distribution (OOD) for the predicted class
-     * using the Mahalanobis distance.
+     * using the Mahalanobis distance. Always false when no matching stats are loaded.
      */
     fun isOOD(embedding: FloatArray, predictedClass: String): Boolean {
         if (!statsLoaded) return false
         val mean = classMeans[predictedClass] ?: return false
-        val dist = mahalanobisDistance(embedding, mean)
-        return dist > mahalanobisThreshold
+        return mahalanobisDistance(embedding, mean) > mahalanobisThreshold
     }
 
     /**
@@ -169,6 +184,7 @@ class PaddyClassifier(context: Context) {
         }.toFloat()
     }
 
+    @Synchronized
     fun close() {
         interpreter.close()
     }
@@ -183,6 +199,9 @@ class PaddyClassifier(context: Context) {
             imageSize = json.optInt("image_size", IMAGE_SIZE)
             confidenceThreshold = json.optDouble("confidence_threshold", CONFIDENCE_THRESHOLD.toDouble()).toFloat()
             entropyFactor = json.optDouble("entropy_factor", 0.75)
+            metaFingerprint = json.optString("checkpoint_fingerprint", "").ifEmpty { null }
+            if (json.has("logits_output_index")) metaLogitsIndex = json.getInt("logits_output_index")
+            if (json.has("embedding_output_index")) metaEmbeddingIndex = json.getInt("embedding_output_index")
 
             val meanArr = json.optJSONArray("mean")
             if (meanArr != null && meanArr.length() == 3) {
@@ -200,84 +219,97 @@ class PaddyClassifier(context: Context) {
                     stdArr.getDouble(2).toFloat()
                 )
             }
-            Log.i("PaddyClassifier", "Loaded model_meta.json (imageSize=$imageSize, confThreshold=$confidenceThreshold)")
+            Log.i(TAG, "Loaded model_meta.json (imageSize=$imageSize, confThreshold=$confidenceThreshold)")
         } catch (e: Exception) {
-            Log.d("PaddyClassifier", "Using default model metadata: ${e.message}")
+            Log.d(TAG, "Using default model metadata: ${e.message}")
         }
         entropyThreshold = (entropyFactor * kotlin.math.ln(labels.size.coerceAtLeast(2).toDouble())).toFloat()
     }
 
+    /**
+     * Loads Mahalanobis stats. Any inconsistency (wrong model, wrong dimensions) disables OOD
+     * detection instead of producing meaningless distances.
+     */
     private fun loadClassStats(context: Context) {
+        statsLoaded = false
         try {
             val jsonStr = context.assets.open(STATS_FILE).bufferedReader().use { it.readText() }
             val json = JSONObject(jsonStr)
-            
-            mahalanobisThreshold = json.getDouble("threshold").toFloat()
-            
+
+            val statsFingerprint = json.optString("checkpoint_fingerprint", "").ifEmpty { null }
+            if (metaFingerprint != null && statsFingerprint != metaFingerprint) {
+                Log.w(TAG, "class_stats.json ($statsFingerprint) does not match model ($metaFingerprint). " +
+                    "Mahalanobis OOD disabled.")
+                return
+            }
+            if (json.optInt("embedding_dim", EMBEDDING_DIM) != EMBEDDING_DIM) {
+                Log.w(TAG, "class_stats.json embedding_dim mismatch. Mahalanobis OOD disabled.")
+                return
+            }
+
+            val threshold = json.getDouble("threshold")
+
             val meansObj = json.getJSONObject("class_means")
-            val meansMap = mutableMapOf<String, FloatArray>()
+            val meansMap = mutableMapOf<String, DoubleArray>()
             meansObj.keys().forEach { key ->
                 val arr = meansObj.getJSONArray(key)
-                val floatArr = FloatArray(arr.length()) { i -> arr.getDouble(i).toFloat() }
-                meansMap[key] = floatArr
+                require(arr.length() == EMBEDDING_DIM) { "class mean '$key' has ${arr.length()} values" }
+                meansMap[key] = DoubleArray(EMBEDDING_DIM) { i -> arr.getDouble(i) }
             }
-            classMeans = meansMap
-            
+
             val precJson = json.getJSONArray("precision_matrix")
-            for (i in 0 until EMBEDDING_DIM) {
+            require(precJson.length() == EMBEDDING_DIM) { "precision matrix has ${precJson.length()} rows" }
+            val precision = Array(EMBEDDING_DIM) { i ->
                 val row = precJson.getJSONArray(i)
-                for (j in 0 until EMBEDDING_DIM) {
-                    precisionMatrix[i][j] = row.getDouble(j).toFloat()
-                }
+                require(row.length() == EMBEDDING_DIM) { "precision row $i has ${row.length()} values" }
+                DoubleArray(EMBEDDING_DIM) { j -> row.getDouble(j) }
             }
+
+            mahalanobisThreshold = threshold
+            classMeans = meansMap
+            precisionMatrix = precision
             statsLoaded = true
         } catch (e: Exception) {
-            Log.w("PaddyClassifier", "Could not load class_stats.json. Mahalanobis OOD disabled.", e)
+            Log.w(TAG, "Could not load class_stats.json. Mahalanobis OOD disabled.", e)
             statsLoaded = false
         }
     }
 
-    private fun mahalanobisDistance(embedding: FloatArray, mean: FloatArray): Float {
+    private fun mahalanobisDistance(embedding: FloatArray, mean: DoubleArray): Double {
         // diff = embedding - mean
-        val diff = FloatArray(EMBEDDING_DIM) { i -> embedding[i] - mean[i] }
-        
+        val diff = DoubleArray(EMBEDDING_DIM) { i -> embedding[i].toDouble() - mean[i] }
+
         // dist = sqrt(diff^T * precision * diff)
-        var sum = 0f
+        var sum = 0.0
         for (i in 0 until EMBEDDING_DIM) {
-            var rowSum = 0f
+            var rowSum = 0.0
             for (j in 0 until EMBEDDING_DIM) {
                 rowSum += precisionMatrix[i][j] * diff[j]
             }
             sum += diff[i] * rowSum
         }
-        return if (sum > 0) sqrt(sum) else 0f
+        return if (sum > 0) sqrt(sum) else 0.0
     }
 
     /**
-     * Preprocess image: padToSquare → resize → normalize with ImageNet mean/std → ByteBuffer.
-     * Matches the Python inference transform exactly:
-     *   PadToSquare() → Resize(456) → Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+     * Fill the reusable input buffer: normalize with model mean/std (NHWC float32).
+     * Matches the Python inference transform:
+     *   PadToSquare() → Resize(imageSize) → Normalize(mean, std)
      */
-    private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * imageSize * imageSize * PIXEL_SIZE * BYTES_PER_FLOAT)
-        buffer.order(ByteOrder.nativeOrder())
+    private fun fillInputBuffer(bitmap: Bitmap) {
+        inputBuffer.rewind()
+        bitmap.getPixels(pixelBuffer, 0, imageSize, 0, 0, imageSize, imageSize)
 
-        val pixels = IntArray(imageSize * imageSize)
-        bitmap.getPixels(pixels, 0, imageSize, 0, 0, imageSize, imageSize)
-
-        for (pixel in pixels) {
+        for (pixel in pixelBuffer) {
             val r = ((pixel shr 16) and 0xFF) / 255.0f
             val g = ((pixel shr 8) and 0xFF) / 255.0f
             val b = (pixel and 0xFF) / 255.0f
 
-            // Normalize with model statistics
-            buffer.putFloat((r - mean[0]) / std[0])
-            buffer.putFloat((g - mean[1]) / std[1])
-            buffer.putFloat((b - mean[2]) / std[2])
+            inputBuffer.putFloat((r - mean[0]) / std[0])
+            inputBuffer.putFloat((g - mean[1]) / std[1])
+            inputBuffer.putFloat((b - mean[2]) / std[2])
         }
-
-        buffer.rewind()
-        return buffer
+        inputBuffer.rewind()
     }
 
     private fun softmax(logits: FloatArray): FloatArray {
@@ -289,7 +321,8 @@ class PaddyClassifier(context: Context) {
 
     /**
      * Pad the shorter side of the bitmap with black pixels to make it square,
-     * preserving the original aspect ratio.  Mirrors PadToSquare() in Python.
+     * preserving the original aspect ratio.  Mirrors PadToSquare() in Python
+     * (integer pixel offsets, so no edge blending).
      */
     private fun padToSquare(bitmap: Bitmap): Bitmap {
         val w = bitmap.width
@@ -300,27 +333,30 @@ class PaddyClassifier(context: Context) {
         val result = Bitmap.createBitmap(maxSide, maxSide, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         canvas.drawColor(Color.BLACK)
-        val left = (maxSide - w) / 2f
-        val top = (maxSide - h) / 2f
+        val left = ((maxSide - w) / 2).toFloat()
+        val top = ((maxSide - h) / 2).toFloat()
         canvas.drawBitmap(bitmap, left, top, null)
         return result
     }
 
     private fun loadModelFile(context: Context): MappedByteBuffer {
-        val assetFd = context.assets.openFd(MODEL_FILE)
-        val inputStream = FileInputStream(assetFd.fileDescriptor)
-        val fileChannel = inputStream.channel
-        return fileChannel.map(
-            FileChannel.MapMode.READ_ONLY,
-            assetFd.startOffset,
-            assetFd.declaredLength
-        )
+        context.assets.openFd(MODEL_FILE).use { assetFd ->
+            FileInputStream(assetFd.fileDescriptor).use { inputStream ->
+                // The mapping stays valid after the descriptor and stream are closed.
+                return inputStream.channel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    assetFd.startOffset,
+                    assetFd.declaredLength
+                )
+            }
+        }
     }
 
     private fun loadLabels(context: Context): List<String> {
         return context.assets.open(LABELS_FILE)
             .bufferedReader()
-            .readLines()
-            .filter { it.isNotBlank() }
+            .use { it.readLines() }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
     }
 }

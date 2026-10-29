@@ -143,7 +143,8 @@ def get_dataloaders(train_dir=TRAIN_DIR, val_dir=VAL_DIR, test_dir=TEST_DIR, max
     loader_gen = torch.Generator().manual_seed(seed + 1)
     sampler = get_weighted_sampler(train_targets, len(class_names), generator=sampler_gen)
 
-    common = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY, worker_init_fn=seed_worker)
+    common = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available(),
+                  worker_init_fn=seed_worker)
     loaders = {
         "train": DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, generator=loader_gen, **common),
         "val": DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, **common),

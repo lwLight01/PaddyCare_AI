@@ -25,12 +25,8 @@ object ImagePreprocessor {
         var green = 0
         val total = pixels.size
 
+        val hsv = FloatArray(3)
         for (pixel in pixels) {
-            val r = Color.red(pixel) / 255f
-            val g = Color.green(pixel) / 255f
-            val b = Color.blue(pixel) / 255f
-
-            val hsv = FloatArray(3)
             Color.RGBToHSV(Color.red(pixel), Color.green(pixel), Color.blue(pixel), hsv)
             val h = hsv[0]  // 0-360 degrees
             val s = hsv[1]  // 0-1

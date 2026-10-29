@@ -27,7 +27,10 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.paddycare.ai.R
 import com.paddycare.ai.data.AppDatabase
+import com.paddycare.ai.data.DiseaseInfo
 import com.paddycare.ai.data.ScanRecord
+import com.paddycare.ai.ui.components.SeverityStyle
+import com.paddycare.ai.ui.components.severityStyle
 import com.paddycare.ai.ui.theme.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -38,7 +41,8 @@ fun HistoryScreen(database: AppDatabase) {
     val pc             = LocalPaddyCareColors.current
     val context        = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val scans          by database.scanDao().getAllScans().collectAsState(initial = emptyList())
+    val scansFlow      = remember(database) { database.scanDao().getAllScans() }
+    val scans          by scansFlow.collectAsState(initial = emptyList())
     var showDialog     by remember { mutableStateOf(false) }
     var selectedTab    by remember { mutableIntStateOf(0) } // 0=List, 1=Stats
 
@@ -198,19 +202,13 @@ private fun HistoryListView(scans: List<ScanRecord>, pc: PaddyCareColors) {
 
 @Composable
 private fun HistoryItemCard(record: ScanRecord, pc: PaddyCareColors) {
-    val formatter  = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
+    val formatter  = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()) }
     val dateString = formatter.format(Date(record.timestamp))
 
-    val (accentColor, accentBg, severityLabel) = when {
-        record.status == "ok" && (record.confidence ?: 0f) >= 70f ->
-            Triple(SeverityHigh, SeverityHighBg, "মারাত্মক")
-        record.status == "ok" && (record.confidence ?: 0f) >= 40f ->
-            Triple(SeverityMedium, SeverityMediumBg, "মাঝারি")
-        record.status == "ok" ->
-            Triple(SeverityLow, SeverityLowBg, "সুস্থ")
-        else ->
-            Triple(SeverityMedium, SeverityMediumBg, "অজানা")
-    }
+    // Severity belongs to the disease, never to the model's confidence.
+    val severity = if (record.status == "ok") severityStyle(record.diseaseName)
+                   else SeverityStyle(SeverityMedium, SeverityMediumBg, "অজানা")
+    val (accentColor, accentBg, severityLabel) = severity
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -300,10 +298,10 @@ private fun HistoryStatsView(scans: List<ScanRecord>, pc: PaddyCareColors) {
     val healthy     = validScans.filter { it.diseaseName == "Healthy" }.size
     val avgConf     = if (total > 0) validScans.mapNotNull { it.confidence }.average().toInt() else 0
 
-    val blastCount   = validScans.count { it.diseaseName == "Blast" }
-    val brownCount   = validScans.count { it.diseaseName == "Brown Spot" }
-    val blightCount  = validScans.count { it.diseaseName == "Bacterial Blight" }
-    val healthyCount = validScans.count { it.diseaseName == "Healthy" }
+    // One bar per class that actually appears in the history (most frequent first).
+    val classCounts = validScans.groupBy { it.diseaseName ?: "?" }
+        .map { (name, list) -> name to list.size }
+        .sortedByDescending { it.second }
 
     Column(
         modifier = Modifier
@@ -338,16 +336,15 @@ private fun HistoryStatsView(scans: List<ScanRecord>, pc: PaddyCareColors) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("📈  রোগের বিতরণ", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = pc.textPrimary)
                     Spacer(Modifier.height(16.dp))
-                    val maxVal = maxOf(blastCount, brownCount, blightCount, healthyCount, 1)
+                    val maxVal = maxOf(classCounts.maxOfOrNull { it.second } ?: 1, 1)
                     Row(
                         modifier = Modifier.fillMaxWidth().height(90.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
-                        BarItem("ব্লাস্ট", blastCount, maxVal, SeverityHigh, pc)
-                        BarItem("বাদামী", brownCount, maxVal, SeverityMedium, pc)
-                        BarItem("ব্লাইট", blightCount, maxVal, SeverityHigh, pc)
-                        BarItem("সুস্থ", healthyCount, maxVal, SeverityLow, pc)
+                        classCounts.forEach { (name, count) ->
+                            BarItem(DiseaseInfo.getBengaliName(name), count, maxVal, severityStyle(name).color, pc)
+                        }
                     }
                 }
             }

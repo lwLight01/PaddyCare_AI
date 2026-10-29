@@ -28,8 +28,12 @@ def android_assets_dir() -> str:
     return os.path.join(os.path.dirname(MODEL_DIR), "PaddyCareAndroid", "app", "src", "main", "assets")
 
 
-def remove_stale_stats() -> None:
-    for path in (CLASS_STATS_PATH, os.path.join(android_assets_dir(), "class_stats.json")):
+def remove_stale_stats(stats_path: str = CLASS_STATS_PATH) -> None:
+    """Remove an unusable stats file. The Android copy is only removed for the production stats path."""
+    paths = [stats_path]
+    if os.path.abspath(stats_path) == os.path.abspath(CLASS_STATS_PATH):
+        paths.append(os.path.join(android_assets_dir(), "class_stats.json"))
+    for path in paths:
         if os.path.exists(path):
             try:
                 os.remove(path)
@@ -65,12 +69,14 @@ def _embed(model, dataset, tag: str):
 
 def _distances(emb, preds, class_means, precision, class_names):
     out = np.full(len(emb), np.nan)
-    for i, (e, p) in enumerate(zip(emb, preds)):
-        mean = class_means.get(class_names[p])
-        if mean is None:
+    for idx, name in enumerate(class_names):
+        mean = class_means.get(name)
+        mask = preds == idx
+        if mean is None or not mask.any():
             continue
-        diff = e - mean
-        out[i] = np.sqrt(max(float(diff @ precision @ diff), 0.0))
+        diff = emb[mask] - mean
+        sq = np.einsum("ij,jk,ik->i", diff, precision, diff)
+        out[mask] = np.sqrt(np.maximum(sq, 0.0))
     return out
 
 
@@ -79,6 +85,7 @@ def extract_and_save(
     val_per_class: int = DEFAULT_STATS_VAL_PER_CLASS,
     test_per_class: int = DEFAULT_STATS_TEST_PER_CLASS,
     model_path: str = MODEL_PATH,
+    output_path: str = CLASS_STATS_PATH,
 ):
 
     logging.info("=" * 60)
@@ -108,7 +115,7 @@ def extract_and_save(
             f"OOD threshold on held-out data (found {0 if val_ds is None else len(val_ds)}). "
             "Stats NOT written."
         )
-        remove_stale_stats()
+        remove_stale_stats(output_path)
         return None
 
     emb, labels, _ = _embed(model, train_ds, "train")
@@ -131,10 +138,11 @@ def extract_and_save(
             f"Only {int(used.sum())} usable samples for a {EMBEDDING_DIM}-dim covariance "
             f"(need >= {MIN_TOTAL_SAMPLES}). Stats NOT written - use a larger --train-per-class."
         )
-        remove_stale_stats()
+        remove_stale_stats(output_path)
         return None
 
-    centred = np.stack([e - class_means[class_names[l]] for e, l in zip(emb[used], labels[used])])
+    mean_table = np.stack([class_means.get(n, np.zeros(emb.shape[1])) for n in class_names])
+    centred = emb[used] - mean_table[labels[used]]
     lw = LedoitWolf(assume_centered=True).fit(centred)
     precision = lw.precision_
     logging.info(f"Ledoit-Wolf shrinkage = {lw.shrinkage_:.4f} | "
@@ -145,7 +153,7 @@ def extract_and_save(
     v_dist = v_dist[~np.isnan(v_dist)]
     if len(v_dist) < MIN_VAL_SAMPLES:
         logging.error("Too few validation images predicted as a class with OOD stats. Stats NOT written.")
-        remove_stale_stats()
+        remove_stale_stats(output_path)
         return None
     threshold = float(np.percentile(v_dist, MAHALANOBIS_PERCENTILE))
     logging.info(f"Val distances: mean {v_dist.mean():.2f}, std {v_dist.std():.2f}, max {v_dist.max():.2f}")
@@ -165,12 +173,13 @@ def extract_and_save(
                     f"{test_flag_rate * 100:.1f}% of known-good test images would be rejected "
                     f"(limit {MAX_TEST_FLAG_RATE * 100:.0f}%). Stats NOT written."
                 )
-                remove_stale_stats()
+                remove_stale_stats(output_path)
                 return None
     else:
         logging.warning("No test images found; OOD stats could not be verified on held-out data.")
 
     stats = {
+        "checkpoint_fingerprint": model.checkpoint_fingerprint,
         "class_names": kept,
         "embedding_dim": EMBEDDING_DIM,
         "class_means": {n: m.tolist() for n, m in class_means.items()},
@@ -188,15 +197,16 @@ def extract_and_save(
         },
     }
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    with open(CLASS_STATS_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
-    logging.info(f"Class stats saved -> {CLASS_STATS_PATH}")
+    logging.info(f"Class stats saved -> {output_path}")
 
     assets = android_assets_dir()
-    if os.path.isdir(assets):
+    is_production = os.path.abspath(output_path) == os.path.abspath(CLASS_STATS_PATH)
+    if is_production and os.path.isdir(assets):
         try:
-            shutil.copy2(CLASS_STATS_PATH, os.path.join(assets, "class_stats.json"))
+            shutil.copy2(output_path, os.path.join(assets, "class_stats.json"))
             logging.info(f"Copied class stats to Android assets -> {assets}")
         except OSError as e:
             logging.warning(f"Could not copy stats to Android assets: {e}")

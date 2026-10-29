@@ -39,9 +39,10 @@ import com.paddycare.ai.data.DiseaseInfo
 import com.paddycare.ai.data.Prediction
 import com.paddycare.ai.data.PredictionResult
 import com.paddycare.ai.ml.ImagePreprocessor
-import com.paddycare.ai.ml.PaddyClassifier
+import com.paddycare.ai.ui.components.severityStyle
 import com.paddycare.ai.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -62,6 +63,24 @@ fun HomeScreen(
     var tempCameraUri  by remember { mutableStateOf<Uri?>(null) }
     var bitmap         by remember { mutableStateOf<Bitmap?>(null) }
     var isAnalyzing    by remember { mutableStateOf(false) }
+
+    // Live scan statistics from the history database (most recent scans).
+    val scansFlow = remember {
+        (context.applicationContext as? PaddyCareApp)?.database?.scanDao()?.getAllScans()
+            ?: flowOf(emptyList<com.paddycare.ai.data.ScanRecord>())
+    }
+    val recentScans by scansFlow.collectAsState(initial = emptyList())
+    val okScans = recentScans.filter { it.status == "ok" }
+
+    // Camera photos are only temporary: drop leftovers from earlier sessions.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val cutoff = System.currentTimeMillis() - 60 * 60 * 1000L
+            File(context.cacheDir, "camera_photos").listFiles()
+                ?.filter { it.lastModified() < cutoff }
+                ?.forEach { it.delete() }
+        }
+    }
 
     // Scanning animation
     val infiniteTransition = rememberInfiniteTransition(label = "scan")
@@ -90,7 +109,11 @@ fun HomeScreen(
         if (success && tempCameraUri != null) { imageUri = tempCameraUri; bitmap = loadBitmap(context, tempCameraUri!!) }
     }
     val cameraPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) { val uri = createTempFile(); tempCameraUri = uri; cameraLauncher.launch(uri) }
+        if (granted) {
+            val uri = createTempFile(); tempCameraUri = uri; cameraLauncher.launch(uri)
+        } else {
+            android.widget.Toast.makeText(context, R.string.camera_permission_msg, android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     LaunchedEffect(launchCameraEvent) {
@@ -107,9 +130,10 @@ fun HomeScreen(
         coroutineScope.launch {
             val (result, scanUri) = try {
                 withContext(Dispatchers.Default) {
-                    val app = context.applicationContext as? PaddyCareApp
-                    val classifier = app?.classifier ?: PaddyClassifier(context)
-                    val lang = app?.settingsManager?.language?.value ?: "bn"
+                    // One shared, synchronized classifier owned by the Application (no per-scan model copies).
+                    val app = context.applicationContext as PaddyCareApp
+                    val classifier = app.classifier
+                    val lang = app.settingsManager.language.value
 
                     val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
                     if (!isPlant) {
@@ -165,7 +189,12 @@ fun HomeScreen(
                 }
             } catch (e: Throwable) {
                 Log.e("HomeScreen", "Inference error", e)
-                Pair(PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"), uri)
+                // Keep a private copy so history never depends on a gallery/camera URI that may expire.
+                val saved = withContext(Dispatchers.IO) { saveScanBitmap(context, bmp) }
+                Pair(
+                    PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"),
+                    if (saved != Uri.EMPTY) saved else uri
+                )
             } finally {
                 isAnalyzing = false
             }
@@ -266,9 +295,9 @@ fun HomeScreen(
                 .offset(y = (-16).dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            StatMiniCard("📸", "স্ক্যান", "0", pc, Modifier.weight(1f))
-            StatMiniCard("🦠", "রোগ", "0", pc, Modifier.weight(1f))
-            StatMiniCard("✅", "সুস্থ", "0", pc, Modifier.weight(1f))
+            StatMiniCard("📸", "স্ক্যান", "${recentScans.size}", pc, Modifier.weight(1f))
+            StatMiniCard("🦠", "রোগ", "${okScans.count { DiseaseInfo.getSeverity(it.diseaseName ?: "") != "none" }}", pc, Modifier.weight(1f))
+            StatMiniCard("✅", "সুস্থ", "${okScans.count { it.diseaseName == "Healthy" }}", pc, Modifier.weight(1f))
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -453,24 +482,34 @@ fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("🦠  সাধারণ রোগসমূহ", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = pc.textPrimary)
+            Text("🦠  শনাক্তযোগ্য রোগসমূহ", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = pc.textPrimary)
         }
         Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            DiseaseQuickCard("Blast", "ব্লাস্ট রোগ", "🌾", "বিপজ্জনক", SeverityHigh, SeverityHighBg, pc, Modifier.weight(1f))
-            DiseaseQuickCard("Brown Spot", "বাদামী দাগ", "🍂", "মাঝারি", SeverityMedium, SeverityMediumBg, pc, Modifier.weight(1f))
+        // Cards come from the classes the installed model really knows (labels.txt), nothing is hard-coded.
+        val modelClasses = remember { loadModelClasses(context) }
+        modelClasses.chunked(2).forEach { pair ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                pair.forEach { name ->
+                    val sev = severityStyle(name)
+                    DiseaseQuickCard(
+                        name, DiseaseInfo.getBengaliName(name), diseaseIcon(name),
+                        sev.label, sev.color, sev.bg, pc, Modifier.weight(1f)
+                    )
+                }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(10.dp))
         }
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            DiseaseQuickCard("Bacterial Blight", "ব্যাকটেরিয়াল ব্লাইট", "🔬", "বিপজ্জনক", SeverityHigh, SeverityHighBg, pc, Modifier.weight(1f))
-            DiseaseQuickCard("Healthy", "সুস্থ গাছ", "✅", "সুস্থ", SeverityLow, SeverityLowBg, pc, Modifier.weight(1f))
-        }
+        Text(
+            text = "এই সংস্করণ শুধু উপরের রোগগুলো শনাক্ত করতে পারে। অন্য রোগ ভুলভাবে শনাক্ত হতে পারে — সন্দেহ হলে কৃষি কর্মকর্তার পরামর্শ নিন।",
+            fontSize = 11.sp,
+            color = pc.textMuted,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
 
         Spacer(Modifier.height(20.dp))
 
@@ -622,6 +661,23 @@ private fun DiseaseQuickCard(
             }
         }
     }
+}
+
+/** Classes the installed model can predict (assets/labels.txt), without the reject class. */
+private fun loadModelClasses(context: android.content.Context): List<String> = try {
+    context.assets.open("labels.txt").bufferedReader().use { it.readLines() }
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !DiseaseInfo.isRejectClass(it) }
+} catch (e: Exception) {
+    emptyList()
+}
+
+private fun diseaseIcon(name: String): String = when (name) {
+    "Healthy"          -> "✅"
+    "Bacterial Blight" -> "🔬"
+    "Blast"            -> "🌾"
+    "Brown Spot"       -> "🍂"
+    else               -> "🍃"
 }
 
 private fun saveScanBitmap(context: android.content.Context, bitmap: Bitmap): Uri {

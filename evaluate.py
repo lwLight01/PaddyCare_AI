@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import argparse
+from datetime import datetime
 import numpy as np
 import torch
 import matplotlib
@@ -27,7 +28,7 @@ from log_utils import setup_logging
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def plot_confusion_matrix(cm: np.ndarray, class_names: list):
+def plot_confusion_matrix(cm: np.ndarray, class_names: list, suffix: str = ""):
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(
         cm, annot=True, fmt="d", cmap="Blues",
@@ -39,7 +40,7 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list):
     ax.set_ylabel("True Label")
     ax.set_title("Confusion Matrix - PaddyCare AI")
     plt.tight_layout()
-    path = os.path.join(LOG_DIR, "confusion_matrix.png")
+    path = os.path.join(LOG_DIR, f"confusion_matrix{suffix}.png")
     plt.savefig(path, dpi=150)
     plt.close()
     logging.info(f"Confusion matrix saved -> {path}")
@@ -73,13 +74,14 @@ def evaluate(model_path: str = MODEL_PATH, subset: int = 0):
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
+        pin_memory=device.type == "cuda",
     )
     logging.info(f"Test samples : {len(test_dataset)}")
     logging.info(f"Classes      : {class_names}")
 
     all_preds, all_labels = [], []
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for images, labels in test_loader:
             images = images.to(device)
             outputs = model(images)
@@ -107,19 +109,27 @@ def evaluate(model_path: str = MODEL_PATH, subset: int = 0):
     logging.info(f"Macro-F1 Score   : {macro_f1:.4f}")
     logging.info(f"\nClassification Report:\n{report}")
 
+    # Subset runs are quick checks: never let them replace the full-test report.
+    suffix = f"_subset{subset}" if subset > 0 else ""
     results = {
+        "model_path": os.path.abspath(model_path),
+        "checkpoint_fingerprint": getattr(model, "checkpoint_fingerprint", None),
+        "checkpoint_epoch": getattr(model, "checkpoint_epoch", None),
+        "subset_per_class": subset,
+        "num_test_samples": int(len(all_labels)),
+        "evaluated_at": datetime.now().isoformat(timespec="seconds"),
         "overall_accuracy": round(acc, 2),
         "macro_f1": round(float(macro_f1), 4),
         "classification_report": report,
         "confusion_matrix": cm.tolist(),
         "classes": class_names,
     }
-    results_path = os.path.join(LOG_DIR, "evaluate_results.json")
+    results_path = os.path.join(LOG_DIR, f"evaluate_results{suffix}.json")
     with open(results_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     logging.info(f"Results saved -> {results_path}")
 
-    plot_confusion_matrix(cm, class_names)
+    plot_confusion_matrix(cm, class_names, suffix)
 
     print(f"\n[evaluate] Overall Accuracy : {acc:.2f}%")
     print(f"[evaluate] Macro-F1 Score   : {macro_f1:.4f}")

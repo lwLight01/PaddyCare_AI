@@ -1,5 +1,6 @@
 package com.paddycare.ai.ui.screens
 
+import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -18,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -27,6 +29,7 @@ import com.paddycare.ai.R
 import com.paddycare.ai.data.Prediction
 import com.paddycare.ai.data.PredictionResult
 import com.paddycare.ai.ui.components.WarningBanner
+import com.paddycare.ai.ui.components.severityStyle
 import com.paddycare.ai.ui.theme.*
 
 @Composable
@@ -37,6 +40,7 @@ fun ResultScreen(
     onScanAgain: () -> Unit
 ) {
     val pc = LocalPaddyCareColors.current
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -61,15 +65,25 @@ fun ResultScreen(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
-            // Share button
-            IconButton(onClick = {}) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(pc.bgTertiary, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Outlined.Share, null, tint = pc.textSecondary, modifier = Modifier.size(18.dp))
+            // Share button (only meaningful when there is a diagnosis)
+            if (result is PredictionResult.Success) {
+                IconButton(onClick = {
+                    val top = result.predictions.first()
+                    val text = "PaddyCare AI: ${top.disease} (${top.confidence.toInt()}%)\n\n${top.treatment}"
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, text)
+                    }
+                    context.startActivity(Intent.createChooser(send, null))
+                }) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(pc.bgTertiary, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Outlined.Share, null, tint = pc.textSecondary, modifier = Modifier.size(18.dp))
+                    }
                 }
             }
         }
@@ -139,11 +153,10 @@ private fun SuccessResult(
     pc: PaddyCareColors
 ) {
     val top = result.predictions.first()
-    val (sevColor, sevBgColor, sevLabel) = when {
-        top.confidence >= 70f -> Triple(SeverityHigh, SeverityHighBg, "মারাত্মক")
-        top.confidence >= 40f -> Triple(SeverityMedium, SeverityMediumBg, "মাঝারি")
-        else                  -> Triple(SeverityLow,  SeverityLowBg,  "সামান্য")
-    }
+    // Severity is a property of the disease, never of the model's confidence.
+    val severity = severityStyle(top.disease)
+    val sevColor = severity.color
+    val sevLabel = severity.label
 
     // ── Full-width image with overlay ─────────────────────────────────
     Box(
@@ -254,13 +267,7 @@ private fun SuccessResult(
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(5.dp))
                             .background(
-                                Brush.horizontalGradient(
-                                    when {
-                                        top.confidence >= 70 -> listOf(Color(0xFFF87171), SeverityHigh)
-                                        top.confidence >= 40 -> listOf(Color(0xFFFBBF24), SeverityMedium)
-                                        else                 -> listOf(GreenLight, pc.greenPrimary)
-                                    }
-                                )
+                                Brush.horizontalGradient(listOf(GreenLight, pc.greenPrimary))
                             )
                     )
                 }

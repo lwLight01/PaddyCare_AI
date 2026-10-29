@@ -70,17 +70,18 @@ EVALUATE_LOG_FILE = os.path.join(LOG_DIR, "evaluate.log")
 VALID_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', '.webp')
 
 def get_active_classes(directory: str = TRAIN_DIR) -> list:
-
+    """Return sorted names of sub-folders of `directory` that contain at least one image."""
     if not os.path.isdir(directory):
         return []
     classes = []
-    for entry in os.scandir(directory):
-        if entry.is_dir():
-            has_images = any(
-                f.name.lower().endswith(VALID_EXTENSIONS)
-                for f in os.scandir(entry.path)
-                if f.is_file()
-            )
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            with os.scandir(entry.path) as files:
+                has_images = any(
+                    f.name.lower().endswith(VALID_EXTENSIONS) for f in files if f.is_file()
+                )
             if has_images:
                 classes.append(entry.name)
     classes.sort()
