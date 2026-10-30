@@ -13,6 +13,7 @@ from config import (
     BATCH_SIZE, EMBEDDING_DIM, MAHALANOBIS_PERCENTILE,
     MIN_SAMPLES_PER_CLASS, MIN_TOTAL_SAMPLES,
     DEFAULT_STATS_TRAIN_PER_CLASS, DEFAULT_STATS_VAL_PER_CLASS, DEFAULT_STATS_TEST_PER_CLASS,
+    CONFIDENCE_THRESHOLD, CALIBRATION_TARGET_PRECISION, CALIBRATION_MIN_THRESHOLD,
 )
 from model import load_model, extract_embedding
 from dataset_utils import val_transform, SafeImageFolder, subset_per_class
@@ -55,16 +56,41 @@ def _load_split(root: str, class_names: list, per_class: int, seed: int):
 
 def _embed(model, dataset, tag: str):
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    embs, labels, preds = [], [], []
+    embs, labels, preds, confs = [], [], [], []
     n = len(dataset)
     for batch_idx, (images, y) in enumerate(loader):
         logits, emb = extract_embedding(model, images.to(device))
+        probs = torch.softmax(logits, dim=1)
         embs.append(emb.cpu().numpy())
         preds.append(logits.argmax(1).cpu().numpy())
+        confs.append(probs.max(1).values.cpu().numpy())
         labels.append(y.numpy())
         if (batch_idx + 1) % 10 == 0:
             logging.info(f"  [{tag}] {min((batch_idx + 1) * BATCH_SIZE, n)} / {n}")
-    return np.concatenate(embs), np.concatenate(labels), np.concatenate(preds)
+    return np.concatenate(embs), np.concatenate(labels), np.concatenate(preds), np.concatenate(confs)
+
+
+def calibrate_confidence_threshold(
+    confs: np.ndarray,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    target_precision: float = CALIBRATION_TARGET_PRECISION,
+    min_threshold: float = CALIBRATION_MIN_THRESHOLD,
+    fallback: float = CONFIDENCE_THRESHOLD,
+) -> float:
+    """Find the lowest threshold >= min_threshold on held-out val that reaches target_precision."""
+    if len(confs) == 0:
+        return fallback
+    correct = (preds == labels)
+    candidates = np.unique(np.clip(confs, min_threshold, 0.99))
+    for thr in np.sort(candidates):
+        mask = confs >= thr
+        if mask.sum() < max(5, int(0.1 * len(confs))):
+            break
+        precision = float(correct[mask].mean())
+        if precision >= target_precision:
+            return round(float(thr), 4)
+    return round(float(fallback), 4)
 
 
 def _distances(emb, preds, class_means, precision, class_names):
@@ -118,7 +144,7 @@ def extract_and_save(
         remove_stale_stats(output_path)
         return None
 
-    emb, labels, _ = _embed(model, train_ds, "train")
+    emb, labels, _, _ = _embed(model, train_ds, "train")
     logging.info(f"Train embeddings: {emb.shape}")
 
     class_means, kept = {}, []
@@ -148,7 +174,10 @@ def extract_and_save(
     logging.info(f"Ledoit-Wolf shrinkage = {lw.shrinkage_:.4f} | "
                  f"cov condition number = {np.linalg.cond(lw.covariance_):.1f}")
 
-    v_emb, _, v_pred = _embed(model, val_ds, "val")
+    v_emb, v_labels, v_pred, v_confs = _embed(model, val_ds, "val")
+    calibrated_conf_thr = calibrate_confidence_threshold(v_confs, v_pred, v_labels)
+    logging.info(f"Calibrated confidence threshold (target precision {CALIBRATION_TARGET_PRECISION:.0%}): "
+                 f"{calibrated_conf_thr:.4f}")
     v_dist = _distances(v_emb, v_pred, class_means, precision, class_names)
     v_dist = v_dist[~np.isnan(v_dist)]
     if len(v_dist) < MIN_VAL_SAMPLES:
@@ -161,7 +190,7 @@ def extract_and_save(
 
     test_flag_rate = None
     if test_ds is not None and len(test_ds) > 0:
-        t_emb, _, t_pred = _embed(model, test_ds, "test")
+        t_emb, _, t_pred, _ = _embed(model, test_ds, "test")
         t_dist = _distances(t_emb, t_pred, class_means, precision, class_names)
         t_dist = t_dist[~np.isnan(t_dist)]
         if len(t_dist):
@@ -185,6 +214,7 @@ def extract_and_save(
         "class_means": {n: m.tolist() for n, m in class_means.items()},
         "precision_matrix": precision.tolist(),
         "threshold": round(threshold, 4),
+        "calibrated_confidence_threshold": calibrated_conf_thr,
         "percentile": MAHALANOBIS_PERCENTILE,
         "num_train_samples": int(used.sum()),
         "num_val_samples": int(len(v_dist)),

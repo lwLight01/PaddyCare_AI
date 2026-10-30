@@ -4,6 +4,7 @@ import android.app.Application
 import com.paddycare.ai.data.AppDatabase
 import com.paddycare.ai.data.DiseaseInfo
 import com.paddycare.ai.data.SettingsManager
+import com.paddycare.ai.ml.ImagePreprocessor
 import com.paddycare.ai.ml.PaddyClassifier
 
 /**
@@ -27,5 +28,6 @@ class PaddyCareApp : Application() {
     override fun onCreate() {
         super.onCreate()
         DiseaseInfo.init(this)
+        ImagePreprocessor.init(this)
     }
 }

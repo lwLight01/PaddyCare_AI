@@ -29,7 +29,8 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val settingsManager = (context.applicationContext as com.paddycare.ai.PaddyCareApp).settingsManager
     
-    val darkMode by settingsManager.darkMode.collectAsState()
+    val darkModePref by settingsManager.darkMode.collectAsState()
+    val darkMode = darkModePref ?: isSystemInDarkTheme()
     val language by settingsManager.language.collectAsState()
     val database = (context.applicationContext as com.paddycare.ai.PaddyCareApp).database
     val coroutineScope = rememberCoroutineScope()
@@ -78,7 +79,8 @@ fun SettingsScreen() {
             modifier = Modifier
                 .fillMaxWidth()
                 .background(pc.bgCard)
-                .padding(top = 52.dp, bottom = 14.dp, start = 20.dp, end = 16.dp),
+                .statusBarsPadding()
+                .padding(top = 12.dp, bottom = 14.dp, start = 20.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {

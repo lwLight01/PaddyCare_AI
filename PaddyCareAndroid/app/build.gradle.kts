@@ -7,12 +7,12 @@ plugins {
 
 android {
     namespace = "com.paddycare.ai"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.paddycare.ai"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
 
@@ -83,18 +83,15 @@ dependencies {
 
     // TensorFlow Lite — on-device AI inference
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // Image loading (Coil for Compose)
+    // Image loading (Coil for Compose) & EXIF handling
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // Room database — scan history
     implementation("androidx.room:room-runtime:2.7.0")
     implementation("androidx.room:room-ktx:2.7.0")
     ksp("androidx.room:room-compiler:2.7.0")
-
-    // Permissions helper
-    implementation("com.google.accompanist:accompanist-permissions:0.34.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

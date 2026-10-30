@@ -148,9 +148,9 @@ class PaddyClassifier(context: Context) {
      */
     @Synchronized
     fun classify(bitmap: Bitmap): ClassifyResult {
-        // Match Python pipeline: PadToSquare() → Resize(imageSize) → Normalize
+        // Match Python pipeline: PadToSquare() → progressive anti-aliased Resize(imageSize) → Normalize
         val squared = padToSquare(bitmap)
-        val resized = Bitmap.createScaledBitmap(squared, imageSize, imageSize, true)
+        val resized = resizeSmooth(squared, imageSize)
         fillInputBuffer(resized)
 
         interpreter.runForMultipleInputsOutputs(arrayOf<Any>(inputBuffer), outputs)
@@ -337,6 +337,33 @@ class PaddyClassifier(context: Context) {
         val top = ((maxSide - h) / 2).toFloat()
         canvas.drawBitmap(bitmap, left, top, null)
         return result
+    }
+
+    /**
+     * Downscale in steps of at most 2× per pass so bilinear filtering approximates
+     * PIL's anti-aliased resize without high-frequency aliasing on leaf lesions.
+     */
+    private fun resizeSmooth(squareBitmap: Bitmap, targetSize: Int): Bitmap {
+        var current = squareBitmap
+        var currentSize = current.width
+        while (currentSize / 2 >= targetSize) {
+            val half = currentSize / 2
+            val next = Bitmap.createScaledBitmap(current, half, half, true)
+            if (current !== squareBitmap && current !== next) {
+                current.recycle()
+            }
+            current = next
+            currentSize = half
+        }
+        return if (currentSize == targetSize) {
+            current
+        } else {
+            val finalBmp = Bitmap.createScaledBitmap(current, targetSize, targetSize, true)
+            if (current !== squareBitmap && current !== finalBmp) {
+                current.recycle()
+            }
+            finalBmp
+        }
     }
 
     private fun loadModelFile(context: Context): MappedByteBuffer {

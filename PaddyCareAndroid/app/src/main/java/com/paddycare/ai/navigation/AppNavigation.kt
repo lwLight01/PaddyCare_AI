@@ -1,6 +1,5 @@
 package com.paddycare.ai.navigation
 
-import android.net.Uri
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -12,8 +11,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -24,16 +21,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.*
 import com.paddycare.ai.PaddyCareApp
-import com.paddycare.ai.R
-import com.paddycare.ai.data.Prediction
-import com.paddycare.ai.data.PredictionResult
-import com.paddycare.ai.data.ScanRecord
+import com.paddycare.ai.ui.ScanViewModel
 import com.paddycare.ai.ui.screens.*
 import com.paddycare.ai.ui.theme.*
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 sealed class Screen(val route: String) {
     object Splash   : Screen("splash")
@@ -52,44 +45,15 @@ data class NavItem(
     val isFab: Boolean = false
 )
 
-/** Lets the latest scan result survive rotation and process death. */
-private val PredictionResultSaver: Saver<PredictionResult?, Any> = Saver(
-    save = { r ->
-        when (r) {
-            null -> arrayListOf<Any>("none")
-            is PredictionResult.Success -> arrayListOf<Any>("ok").apply {
-                r.predictions.forEach { add(it.disease); add(it.confidence); add(it.treatment) }
-            }
-            is PredictionResult.NotPaddy      -> arrayListOf<Any>("not_paddy", r.message)
-            is PredictionResult.LowConfidence -> arrayListOf<Any>("low_confidence", r.message)
-            is PredictionResult.Error         -> arrayListOf<Any>("error", r.message)
-        }
-    },
-    restore = { saved ->
-        @Suppress("UNCHECKED_CAST")
-        val l = saved as List<Any>
-        when (l[0] as String) {
-            "ok" -> PredictionResult.Success(
-                l.drop(1).chunked(3).map { Prediction(it[0] as String, it[1] as Float, it[2] as String) }
-            )
-            "not_paddy"      -> PredictionResult.NotPaddy(l[1] as String)
-            "low_confidence" -> PredictionResult.LowConfidence(l[1] as String)
-            "error"          -> PredictionResult.Error(l[1] as String)
-            else             -> null
-        }
-    }
-)
-
 @Composable
-fun PaddyCareNavHost() {
+fun PaddyCareNavHost(scanViewModel: ScanViewModel = viewModel()) {
     val navController  = rememberNavController()
     val context        = LocalContext.current
     val database       = (context.applicationContext as PaddyCareApp).database
-    val coroutineScope = rememberCoroutineScope()
     val pc             = LocalPaddyCareColors.current
 
-    var currentResult  by rememberSaveable(stateSaver = PredictionResultSaver) { mutableStateOf<PredictionResult?>(null) }
-    var currentImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    val currentResult   by scanViewModel.currentResult.collectAsState()
+    val currentImageUri by scanViewModel.currentImageUri.collectAsState()
     var launchCameraEvent by remember { mutableStateOf(false) }
 
     val navItems = listOf(
@@ -131,7 +95,6 @@ fun PaddyCareNavHost() {
                     ) {
                         navItems.forEach { item ->
                             if (item.isFab) {
-                                // FAB scan button
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
@@ -150,16 +113,16 @@ fun PaddyCareNavHost() {
                                         contentAlignment = Alignment.Center
                                     ) {
                                         IconButton(
-                                            onClick = { 
+                                            onClick = {
                                                 launchCameraEvent = true
                                                 if (currentRoute != Screen.Home.route) {
-                                                    navController.navigate(Screen.Home.route) { launchSingleTop = true } 
+                                                    navController.navigate(Screen.Home.route) { launchSingleTop = true }
                                                 }
                                             },
                                             modifier = Modifier.size(52.dp)
                                         ) {
                                             Icon(
-                                                item.selectedIcon, null,
+                                                item.selectedIcon, "ক্যামেরা দিয়ে স্ক্যান করুন",
                                                 tint = Color.White,
                                                 modifier = Modifier.size(24.dp)
                                             )
@@ -182,7 +145,7 @@ fun PaddyCareNavHost() {
                                         Box(contentAlignment = Alignment.TopCenter) {
                                             Icon(
                                                 imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
-                                                contentDescription = null,
+                                                contentDescription = item.label,
                                                 modifier = Modifier.size(22.dp)
                                             )
                                         }
@@ -218,7 +181,6 @@ fun PaddyCareNavHost() {
             popEnterTransition  = { fadeIn(tween(250)) },
             popExitTransition   = { fadeOut(tween(200)) + slideOutHorizontally { it / 12 } }
         ) {
-            // Splash
             composable(Screen.Splash.route) {
                 SplashScreen {
                     navController.navigate(Screen.Home.route) {
@@ -227,53 +189,17 @@ fun PaddyCareNavHost() {
                 }
             }
 
-            // Home / Scan
             composable(Screen.Home.route) {
                 HomeScreen(
+                    scanViewModel = scanViewModel,
                     launchCameraEvent = launchCameraEvent,
                     onCameraLaunched = { launchCameraEvent = false },
-                    onAnalyzeComplete = { result, uri ->
-                        currentResult   = result
-                        currentImageUri = uri
-                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            val savedPath = uri.toString()
-                            val record = when (result) {
-                                is PredictionResult.Success -> {
-                                    val top = result.predictions.first()
-                                    ScanRecord(
-                                        imagePath    = savedPath,
-                                        status       = "ok",
-                                        diseaseName  = top.disease,
-                                        diseaseNameBn = top.diseaseBn,
-                                        confidence   = top.confidence,
-                                        treatment    = top.treatment
-                                    )
-                                }
-                                is PredictionResult.NotPaddy      -> ScanRecord(imagePath = savedPath, status = "not_paddy", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
-                                is PredictionResult.LowConfidence -> ScanRecord(imagePath = savedPath, status = "low_confidence", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
-                                is PredictionResult.Error         -> ScanRecord(imagePath = savedPath, status = "error", diseaseName = null, diseaseNameBn = null, confidence = null, treatment = null)
-                            }
-                            database.scanDao().insert(record)
-
-                            // Prune history to keep at most 50 scans and clean up old images
-                            try {
-                                val overflowPaths = database.scanDao().getOverflowImagePaths(50)
-                                database.scanDao().deleteOverflowRecords(50)
-                                for (path in overflowPaths) {
-                                    val fileUri = Uri.parse(path)
-                                    if (fileUri.scheme == "file") {
-                                        val file = java.io.File(fileUri.path ?: "")
-                                        if (file.exists()) file.delete()
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }
+                    onNavigateToResult = {
                         navController.navigate(Screen.Result.route)
                     }
                 )
             }
 
-            // Result
             composable(Screen.Result.route) {
                 val result = currentResult
                 val imageUri = currentImageUri
@@ -285,18 +211,14 @@ fun PaddyCareNavHost() {
                         onScanAgain = { navController.popBackStack(Screen.Home.route, false) }
                     )
                 } else {
-                    // Nothing to show (state was lost): leave instead of rendering a blank screen.
                     LaunchedEffect(Unit) { navController.popBackStack() }
                 }
             }
 
-            // History
             composable(Screen.History.route) { HistoryScreen(database = database) }
 
-            // Experts
             composable(Screen.Experts.route) { ExpertsScreen() }
 
-            // Settings
             composable(Screen.Settings.route) { SettingsScreen() }
         }
     }

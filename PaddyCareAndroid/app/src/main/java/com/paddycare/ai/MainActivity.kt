@@ -15,7 +15,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val app = application as com.paddycare.ai.PaddyCareApp
-            val isDarkTheme by app.settingsManager.darkMode.collectAsState(initial = androidx.compose.foundation.isSystemInDarkTheme())
+            val darkModePref by app.settingsManager.darkMode.collectAsState()
+            val isDarkTheme = darkModePref ?: androidx.compose.foundation.isSystemInDarkTheme()
             PaddyCareTheme(darkTheme = isDarkTheme) {
                 PaddyCareNavHost()
             }

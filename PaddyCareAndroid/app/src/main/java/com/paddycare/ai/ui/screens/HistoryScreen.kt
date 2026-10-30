@@ -95,7 +95,8 @@ fun HistoryScreen(database: AppDatabase) {
             modifier = Modifier
                 .fillMaxWidth()
                 .background(pc.bgCard)
-                .padding(top = 52.dp, bottom = 12.dp, start = 20.dp, end = 12.dp),
+                .statusBarsPadding()
+                .padding(top = 12.dp, bottom = 12.dp, start = 20.dp, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {

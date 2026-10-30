@@ -81,7 +81,17 @@ Run the export script. It will validate `diseases.json`, export `model_meta.json
 ```bash
 python export_tflite.py
 ```
-*Note: You can use `python export_tflite.py --quantize` to shrink the model size using int8 quantization.*
+*Options:*
+- `python export_tflite.py --precision fp16` : Export a float16 TFLite model (~50% smaller, near-lossless accuracy).
+- `python export_tflite.py --precision dr` (or `--quantize`) : Apply dynamic-range int8 quantization (int8 weights, float activations).
+- `python export_tflite.py --require-stats` : Fail the export if matching Mahalanobis OOD stats (`class_stats.json`) are missing.
+
+### Dataset Verification & Unit Tests
+Check dataset splits for corrupt/truncated files or cross-split duplicate leakage, and run the automated test suite:
+```bash
+python verify_dataset.py
+python tests/test_pipeline.py
+```
 
 The export script outputs and syncs:
 - `models/model.tflite` -> `PaddyCareAndroid/app/src/main/assets/model.tflite`

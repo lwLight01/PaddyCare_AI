@@ -34,16 +34,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.exifinterface.media.ExifInterface
 import com.paddycare.ai.R
 import com.paddycare.ai.data.DiseaseInfo
-import com.paddycare.ai.data.Prediction
-import com.paddycare.ai.data.PredictionResult
-import com.paddycare.ai.ml.ImagePreprocessor
+import com.paddycare.ai.ui.ScanViewModel
 import com.paddycare.ai.ui.components.severityStyle
 import com.paddycare.ai.ui.theme.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -51,25 +48,21 @@ import java.util.*
 
 @Composable
 fun HomeScreen(
+    scanViewModel: ScanViewModel,
     launchCameraEvent: Boolean = false,
     onCameraLaunched: () -> Unit = {},
-    onAnalyzeComplete: (PredictionResult, Uri) -> Unit
+    onNavigateToResult: () -> Unit
 ) {
     val context      = LocalContext.current
     val pc           = LocalPaddyCareColors.current
-    val coroutineScope = rememberCoroutineScope()
 
     var imageUri       by remember { mutableStateOf<Uri?>(null) }
     var tempCameraUri  by remember { mutableStateOf<Uri?>(null) }
     var bitmap         by remember { mutableStateOf<Bitmap?>(null) }
-    var isAnalyzing    by remember { mutableStateOf(false) }
+    val isAnalyzing    by scanViewModel.isAnalyzing.collectAsState()
 
     // Live scan statistics from the history database (most recent scans).
-    val scansFlow = remember {
-        (context.applicationContext as? PaddyCareApp)?.database?.scanDao()?.getAllScans()
-            ?: flowOf(emptyList<com.paddycare.ai.data.ScanRecord>())
-    }
-    val recentScans by scansFlow.collectAsState(initial = emptyList())
+    val recentScans by scanViewModel.scans.collectAsState()
     val okScans = recentScans.filter { it.status == "ok" }
 
     // Camera photos are only temporary: drop leftovers from earlier sessions.
@@ -126,85 +119,7 @@ fun HomeScreen(
     fun analyzeImage() {
         val bmp = bitmap ?: return
         val uri = imageUri ?: return
-        isAnalyzing = true
-        coroutineScope.launch {
-            val (result, scanUri) = try {
-                withContext(Dispatchers.Default) {
-                    // One shared, synchronized classifier owned by the Application (no per-scan model copies).
-                    val app = context.applicationContext as PaddyCareApp
-                    val classifier = app.classifier
-                    val lang = app.settingsManager.language.value
-
-                    val (isPlant, _) = ImagePreprocessor.checkPaddyImage(bmp)
-                    if (!isPlant) {
-                        val saved = saveScanBitmap(context, bmp)
-                        return@withContext Pair(PredictionResult.NotPaddy(context.getString(R.string.not_paddy_msg)), saved)
-                    }
-
-                    val classResult = classifier.classify(bmp)
-                    val predictions = classResult.predictions
-                    if (predictions.isEmpty()) {
-                        val saved = saveScanBitmap(context, bmp)
-                        return@withContext Pair(PredictionResult.Error("No prediction available from model."), saved)
-                    }
-
-                    val entropy = classifier.entropy(predictions.map { it.second })
-                    val topPred = predictions.first()
-                    val saved = saveScanBitmap(context, bmp)
-
-                    if (DiseaseInfo.isRejectClass(topPred.first)) {
-                        return@withContext Pair(PredictionResult.NotPaddy(DiseaseInfo.getTreatment(topPred.first, lang)), saved)
-                    }
-
-                    if (classifier.isOOD(classResult.embedding, topPred.first)) {
-                        val oodMsg = if (lang == "en") {
-                            "This image resembles a paddy leaf, but the model cannot recognize it reliably.\nPlease provide a clearer photo of a paddy leaf."
-                        } else {
-                            "🚫 এই ছবিটি ধান পাতার মতো দেখালেও, মডেল এটিকে চিনতে পারছে না।\nঅনুগ্রহ করে একটি স্পষ্ট ধান পাতার ছবি দিন।"
-                        }
-                        return@withContext Pair(PredictionResult.NotPaddy(oodMsg), saved)
-                    }
-
-                    if (topPred.second < classifier.confidenceThreshold || entropy > classifier.entropyThreshold) {
-                        return@withContext Pair(PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg)), saved)
-                    }
-
-                    val resultList = predictions.filter { !DiseaseInfo.isRejectClass(it.first) }
-                        .filterIndexed { i, p -> i == 0 || p.second >= 0.10f }
-                        .take(2)
-                        .map { (disease, conf) ->
-                            Prediction(
-                                disease = disease,
-                                confidence = conf * 100f,
-                                treatment = DiseaseInfo.getTreatment(disease, lang)
-                            )
-                        }
-
-                    val finalResult = if (resultList.isEmpty()) {
-                        PredictionResult.LowConfidence(context.getString(R.string.low_confidence_msg))
-                    } else {
-                        PredictionResult.Success(resultList)
-                    }
-                    Pair(finalResult, saved)
-                }
-            } catch (e: Throwable) {
-                Log.e("HomeScreen", "Inference error", e)
-                // Keep a private copy so history never depends on a gallery/camera URI that may expire.
-                val saved = withContext(Dispatchers.IO) { saveScanBitmap(context, bmp) }
-                Pair(
-                    PredictionResult.Error(e.localizedMessage ?: "Unexpected error during classification"),
-                    if (saved != Uri.EMPTY) saved else uri
-                )
-            } finally {
-                isAnalyzing = false
-            }
-
-            try {
-                onAnalyzeComplete(result, scanUri)
-            } catch (e: Throwable) {
-                Log.e("HomeScreen", "onAnalyzeComplete error", e)
-            }
-        }
+        scanViewModel.analyzeImage(bmp, uri, onNavigateToResult)
     }
 
     Column(
@@ -680,20 +595,6 @@ private fun diseaseIcon(name: String): String = when (name) {
     else               -> "🍃"
 }
 
-private fun saveScanBitmap(context: android.content.Context, bitmap: Bitmap): Uri {
-    return try {
-        val scansDir = java.io.File(context.filesDir, "scans").apply { mkdirs() }
-        val scanFile = java.io.File(scansDir, "scan_${System.currentTimeMillis()}.jpg")
-        scanFile.outputStream().use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
-        }
-        Uri.fromFile(scanFile)
-    } catch (e: Exception) {
-        Uri.EMPTY
-    }
-}
-
-@Suppress("DEPRECATION")
 private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = try {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         val source = ImageDecoder.createSource(context.contentResolver, uri)
@@ -726,20 +627,20 @@ private fun loadBitmap(context: android.content.Context, uri: Uri): Bitmap? = tr
 
         val orientation = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                android.media.ExifInterface(stream).getAttributeInt(
-                    android.media.ExifInterface.TAG_ORIENTATION,
-                    android.media.ExifInterface.ORIENTATION_NORMAL
+                ExifInterface(stream).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
                 )
-            } ?: android.media.ExifInterface.ORIENTATION_NORMAL
+            } ?: ExifInterface.ORIENTATION_NORMAL
         } catch (e: Exception) {
-            android.media.ExifInterface.ORIENTATION_NORMAL
+            ExifInterface.ORIENTATION_NORMAL
         }
 
         val matrix = android.graphics.Matrix()
         when (orientation) {
-            android.media.ExifInterface.ORIENTATION_ROTATE_90  -> matrix.postRotate(90f)
-            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_ROTATE_90  -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
         }
         if (!matrix.isIdentity) {
             Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)

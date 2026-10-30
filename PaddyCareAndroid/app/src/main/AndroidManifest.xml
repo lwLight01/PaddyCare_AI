@@ -11,13 +11,13 @@
 
     <application
         android:name=".PaddyCareApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="PaddyCare AI"
         android:supportsRtl="true"
         android:theme="@style/Theme.PaddyCareAI"
-        tools:targetApi="34">
+        tools:targetApi="35">
 
         <activity
             android:name=".MainActivity"

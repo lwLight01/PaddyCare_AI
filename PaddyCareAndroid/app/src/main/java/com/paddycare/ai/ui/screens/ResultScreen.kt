@@ -52,11 +52,12 @@ fun ResultScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(pc.bgCard)
-                .padding(top = 48.dp, bottom = 12.dp, start = 4.dp, end = 16.dp),
+                .statusBarsPadding()
+                .padding(top = 8.dp, bottom = 12.dp, start = 4.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = pc.textPrimary)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "ফিরুন", tint = pc.textPrimary)
             }
             Text(
                 text = "বিশ্লেষণের ফলাফল",

@@ -2,26 +2,21 @@ from __future__ import annotations
 
 import os
 import sys
-if hasattr(sys.stdout, "reconfigure"):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
 import shutil
 import argparse
+import json
 import numpy as np
 import torch
 import torch.nn as nn
 
-import json
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from log_utils import configure_stdio
+configure_stdio()
+
 from config import (
     IMAGE_SIZE, MODEL_DIR, MODEL_PATH, CLASS_STATS_PATH, DISEASES_JSON_PATH,
     MODEL_META_PATH, NORM_MEAN, NORM_STD, CONFIDENCE_THRESHOLD, ENTROPY_FACTOR,
-    TEST_DIR,
+    TEST_DIR, LEAF_CHECK,
 )
 from model import (
     build_model as _build_model, DualOutputWrapper, load_checkpoint, checkpoint_fingerprint,
@@ -101,9 +96,9 @@ def step2_export_onnx(model: nn.Module):
         print(" onnx package not installed, skipping ONNX validation check.")
 
 
-def step3_convert_tflite(quantize: bool = False) -> bool:
-    """Convert ONNX -> TFLite. Returns True if the dynamic-range quantized model was produced."""
-    print("\n[Step 3/4] Converting ONNX → TFLite ...")
+def step3_convert_tflite(precision: str = "fp32") -> str:
+    """Convert ONNX -> TFLite. Returns the actual precision written ('fp32', 'fp16', or 'dr')."""
+    print(f"\n[Step 3/4] Converting ONNX → TFLite (requested precision: {precision}) ...")
 
     try:
         import onnx2tf
@@ -122,34 +117,54 @@ def step3_convert_tflite(quantize: bool = False) -> bool:
         non_verbose=True,
     )
 
-    generated_tflite = os.path.join(TFLITE_DIR, "model_float32.tflite")
-    if not os.path.exists(generated_tflite):
-        print(f"   Float32 TFLite model not found: {generated_tflite}")
+    generated_fp32 = os.path.join(TFLITE_DIR, "model_float32.tflite")
+    if not os.path.exists(generated_fp32):
+        print(f"   Float32 TFLite model not found: {generated_fp32}")
         sys.exit(1)
 
-    shutil.copy2(generated_tflite, TFLITE_PATH)
+    if precision == "fp16":
+        generated_fp16 = os.path.join(TFLITE_DIR, "model_float16.tflite")
+        if os.path.exists(generated_fp16):
+            shutil.copy2(generated_fp16, TFLITE_PATH)
+        else:
+            try:
+                import tensorflow as tf
+                converter = tf.lite.TFLiteConverter.from_saved_model(TFLITE_DIR)
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                converter.target_spec.supported_types = [tf.float16]
+                with open(TFLITE_PATH, "wb") as f:
+                    f.write(converter.convert())
+            except Exception as e:
+                print(f"  Could not produce fp16 TFLite ({e}), falling back to float32.")
+                shutil.copy2(generated_fp32, TFLITE_PATH)
+                return "fp32"
+        size_mb = os.path.getsize(TFLITE_PATH) / (1024 * 1024)
+        print(f"   TFLite model saved: {TFLITE_PATH} ({size_mb:.1f} MB (float16))")
+        return "fp16"
+
+    shutil.copy2(generated_fp32, TFLITE_PATH)
     size_mb = os.path.getsize(TFLITE_PATH) / (1024 * 1024)
     print(f"   TFLite model saved: {TFLITE_PATH} ({size_mb:.1f} MB (float32))")
 
-    if not quantize:
-        return False
+    if precision != "dr":
+        return "fp32"
 
     print("  Applying dynamic-range quantization (int8 weights, float activations) ...")
     try:
         import tensorflow as tf
-    except ImportError:
-        print("  TensorFlow not installed, keeping the float32 model.")
-        return False
-    converter = tf.lite.TFLiteConverter.from_saved_model(TFLITE_DIR)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    quantized_model = converter.convert()
+        converter = tf.lite.TFLiteConverter.from_saved_model(TFLITE_DIR)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        quantized_model = converter.convert()
+    except Exception as e:
+        print(f"  Dynamic-range quantization failed ({e}), keeping the float32 model.")
+        return "fp32"
 
     with open(TFLITE_PATH, "wb") as f:
         f.write(quantized_model)
 
     q_size_mb = os.path.getsize(TFLITE_PATH) / (1024 * 1024)
     print(f"  Quantized model saved: {TFLITE_PATH} ({q_size_mb:.1f} MB (dynamic-range int8))")
-    return True
+    return "dr"
 
 
 def _run_tflite(interpreter, x_nchw: np.ndarray) -> list:
@@ -314,18 +329,35 @@ def check_ood_stats(fingerprint: str, require: bool) -> bool:
 
 
 def write_model_meta(class_names: list, fingerprint: str, ood_enabled: bool, tflite_info: dict | None,
-                     quantized: bool, backbone: str = "efficientnet_b5"):
+                     precision: str, backbone: str = "efficientnet_b5"):
+    conf_thr = CONFIDENCE_THRESHOLD
+    if ood_enabled and os.path.exists(CLASS_STATS_PATH):
+        try:
+            with open(CLASS_STATS_PATH, "r", encoding="utf-8") as f:
+                stats_data = json.load(f)
+            if "calibrated_confidence_threshold" in stats_data:
+                conf_thr = float(stats_data["calibrated_confidence_threshold"])
+        except Exception:
+            pass
+
+    precision_name = {
+        "fp32": "float32",
+        "fp16": "float16",
+        "dr": "dynamic_range_int8",
+    }.get(precision, precision)
+
     meta = {
         "image_size": IMAGE_SIZE,
         "mean": NORM_MEAN,
         "std": NORM_STD,
         "backbone": backbone,
         "classes": class_names,
-        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "confidence_threshold": conf_thr,
         "entropy_factor": ENTROPY_FACTOR,
         "checkpoint_fingerprint": fingerprint,
-        "precision": "dynamic_range_int8" if quantized else "float32",
+        "precision": precision_name,
         "ood_stats_included": ood_enabled,
+        "leaf_check": LEAF_CHECK,
     }
     if tflite_info:
         meta.update(tflite_info)
@@ -375,8 +407,12 @@ def copy_assets_to_android(ship_stats: bool):
 def main():
     parser = argparse.ArgumentParser(description="Convert PaddyCare PyTorch model to TFLite")
     parser.add_argument(
+        "--precision", choices=["fp32", "fp16", "dr"], default="fp32",
+        help="TFLite model precision: fp32 (default), fp16 (~50%% smaller, near-lossless), or dr (dynamic-range int8)"
+    )
+    parser.add_argument(
         "--quantize", action="store_true",
-        help="Apply dynamic-range quantization (int8 weights, float activations) to reduce model size"
+        help="Alias for --precision dr (dynamic-range int8 weights)"
     )
     parser.add_argument("--model", default=PTH_PATH, help="Checkpoint to export")
     parser.add_argument("--require-stats", action="store_true",
@@ -386,6 +422,7 @@ def main():
     parser.add_argument("--parity-tol", type=float, default=DEFAULT_PARITY_TOL,
                         help="Max allowed |PyTorch - TFLite| output difference for float32 exports")
     args = parser.parse_args()
+    requested_precision = "dr" if args.quantize else args.precision
 
     print("=" * 60)
     print("  PaddyCare AI — Model Export Pipeline")
@@ -396,11 +433,14 @@ def main():
     validate_diseases_json(class_names)
     ood_enabled = check_ood_stats(fingerprint, args.require_stats)
     step2_export_onnx(model)
-    quantized = step3_convert_tflite(quantize=args.quantize)
-    tflite_info = step4_validate_tflite(model, class_names, quantized, args.eval_per_class, args.parity_tol)
+    actual_precision = step3_convert_tflite(precision=requested_precision)
+    tflite_info = step4_validate_tflite(
+        model, class_names, quantized=(actual_precision != "fp32"),
+        eval_per_class=args.eval_per_class, parity_tol=args.parity_tol
+    )
 
     # Only after the model passed validation do we write metadata and sync assets.
-    write_model_meta(class_names, fingerprint, ood_enabled, tflite_info, quantized)
+    write_model_meta(class_names, fingerprint, ood_enabled, tflite_info, actual_precision)
     create_labels_file(class_names)
     copy_assets_to_android(ship_stats=ood_enabled)
 
